@@ -798,18 +798,11 @@ def assessment_report(assessment_id: str, verify: bool = True, format: str = "js
     report["report_sha256"] = report_hash
     report["report_artifact"] = report_artifact.__dict__
     report["hash_verified"] = (content_hash(submission["records"]) == submission["content_sha256"]) if verify else None
+    from .reporting import render_soc_inspect_html, render_soc_inspect_pdf
     if format == "html":
-        title = f"SOC-Inspect assessment {assessment_id}"
-        rows = "".join(f"<li><b>{f['severity'].upper()}</b> {f['title']} — {f['description']}</li>" for f in report["findings"])
-        html = f"<html><head><title>{title}</title></head><body><h1>{title}</h1><p>Dataset SHA-256: {submission['content_sha256']}</p><ul>{rows}</ul><p>Report SHA-256: {report_hash}</p></body></html>"
-        artifact_store.put("reports", assessment_id, html.encode(), "html")
-        return HTMLResponse(html)
+        return HTMLResponse(render_soc_inspect_html(report, report_hash))
     if format == "pdf":
-        # Minimal dependency-free PDF for offline prototype export.
-        text = f"SOC-Inspect assessment {assessment_id}\\nDataset SHA-256: {submission['content_sha256']}\\nFindings: {len(report['findings'])}\\nReport SHA-256: {report_hash}"
-        stream = f"BT /F1 10 Tf 50 750 Td ({text.replace('(', '[').replace(')', ']')}) Tj ET".encode()
-        pdf = b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 4 0 R>>>>/Contents 5 0 R>>endobj\n4 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\n5 0 obj<</Length " + str(len(stream)).encode() + b">>stream\n" + stream + b"\nendstream\nendobj\ntrailer<</Root 1 0 R>>\n%%EOF"
-        artifact_store.put("reports", assessment_id, pdf, "pdf")
+        pdf = render_soc_inspect_pdf(report, report_hash)
         return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=assessment-{assessment_id}.pdf"})
     if format != "json":
         raise error(400, "format must be json, html, or pdf")
@@ -1646,56 +1639,15 @@ def sat_report(entity_id: str | None = None, sector: str | None = None,
               "limitations": ["Periodic submission only; supervisor validation required.", "Missing evidence reported as insufficient evidence, never compliant.", "Synthetic demonstration data."],
               "findings": _sat_findings(entity_id, sector)}
     _audit("report_generated", "supervisor", "supervisor", "report", "sat-report", f"generate {format} report", None, {"entities": len(comp)}, None, "api")
+    from .reporting import render_html, render_pdf
     if format == "json":
         return report
     if format == "html":
-        dist = report["compliance_distribution"]
-        ent_rows = "".join(
-            f"<tr><td>{e['entity_name']}</td><td>{e.get('sector','')}</td>"
-            f"<td>{e['status']}</td><td>{e['compliance_score']}%</td>"
-            f"<td>{e['risk_score']}</td><td>{e['critical']}/{e['high']}</td>"
-            f"<td>{e['recommended_action']}</td></tr>" for e in comp)
-        crit_rows = "".join(
-            f"<li><b>[{str(f.get('severity','')).upper()}]</b> {f.get('title','')} — "
-            f"entity {f.get('entity_id','')}, rule {f.get('rule','')}, "
-            f"evidence records {len(f.get('evidence', []))}</li>"
-            for f in report["critical_findings"][:50])
-        html = (f"<html><head><title>SAT-SA Supervisory Assessment Report</title></head><body>"
-                f"<h1>SAT-SA Supervisory Assessment Report</h1>"
-                f"<p><b>{report['disclaimer']}</b></p>"
-                f"<h2>1. Executive summary</h2><p>{report['executive_summary']}</p>"
-                f"<h2>2. Assessment scope</h2><p>Period {report['assessment_scope']['period']}; "
-                f"entity filter {report['assessment_scope']['entity_filter']}; "
-                f"sector filter {report['assessment_scope']['sector_filter']}.</p>"
-                f"<h2>3. Dataset</h2><p>Alert records: {report['dataset']['records']}; "
-                f"SHA-256: {report['dataset']['sha256']}; rule version: {report['rule_version']}.</p>"
-                f"<h2>4. Compliance distribution</h2><p>Compliant {dist.get('COMPLIANT',0)}; "
-                f"Partially compliant {dist.get('PARTIALLY_COMPLIANT',0)}; "
-                f"Non-compliant {dist.get('NON_COMPLIANT',0)}; "
-                f"Insufficient evidence {dist.get('INSUFFICIENT_EVIDENCE',0)}.</p>"
-                f"<h2>5. Entity assessments &amp; recommended actions</h2>"
-                f"<table border='1'><tr><th>Entity</th><th>Sector</th><th>Status</th><th>Compliance</th>"
-                f"<th>Risk</th><th>Crit/High</th><th>Action</th></tr>{ent_rows}</table>"
-                f"<h2>6. Critical findings (top 50)</h2><ul>{crit_rows}</ul>"
-                f"<h2>7. Data quality</h2><p>Overall {report['data_quality'].get('overall')}% "
-                f"({report['data_quality'].get('formula','')}).</p>"
-                f"<h2>8. Methodology</h2><p>{report['methodology']}</p>"
-                f"<h2>9. Limitations</h2><ul>" +
-                "".join(f"<li>{l}</li>" for l in report["limitations"]) +
-                f"</ul><p>Generated {report['assessment_timestamp']}; "
-                f"dataset hash {report['dataset_hash']}.</p></body></html>")
-        return HTMLResponse(html)
+        return HTMLResponse(render_html(report))
     if format == "pdf":
-        text = f"SAT supervisory report\\nEntities: {len(report['entities'])}\\nExecution gaps: {len(report['execution_gaps'])}"
-        stream = f"BT /F1 10 Tf 50 750 Td ({text.replace('(', '[').replace(')', ']')}) Tj ET".encode()
-        pdf = (b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
-               b"2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n"
-               b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 4 0 R>>>>/Contents 5 0 R>>endobj\n"
-               b"4 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\n5 0 obj<</Length " +
-               str(len(stream)).encode() + b">>stream\n" + stream +
-               b"\nendstream\nendobj\ntrailer<</Root 1 0 R>>\n%%EOF")
+        pdf = render_pdf(report)
         return Response(content=pdf, media_type="application/pdf",
-                        headers={"Content-Disposition": "attachment; filename=sat-report.pdf"})
+                        headers={"Content-Disposition": "attachment; filename=sat-supervisory-report.pdf"})
     raise error(422, "format must be json, html, or pdf")
 
 

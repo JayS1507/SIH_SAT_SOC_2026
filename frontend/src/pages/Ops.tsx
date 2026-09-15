@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { useFetch, useFilters, Page, Panel, Card, Table, Disclaimer, FilterBar,
+import { useFetch, useFilters, Page, Panel, Card, Table, FilterBar,
   Donut, Bars, Trend, FunnelView, SEV_COLORS, type AnyRecord } from "../ui";
 
 function useSectors() {
@@ -31,7 +31,6 @@ export function Alerts() {
   }));
   return (
     <Page title="Alert analytics" subtitle="Volume, severity, escalation coverage and case linkage">
-      <Disclaimer />
       <FilterBar sectors={sectors} />
       <div className="kpis">
         <Card label="Alert volume" value={data.total} />
@@ -75,7 +74,6 @@ export function Investigations() {
   const dur = Object.entries((data.duration_distribution || {}) as Record<string, number>).map(([name, value]) => ({ name: `${name} min`, value }));
   return (
     <Page title="Investigation analytics" subtitle="Throughput, conclusions, timeliness and SLA discipline">
-      <Disclaimer />
       <FilterBar sectors={sectors} />
       <div className="kpis">
         <Card label="Total investigations" value={data.cases_with_investigation} />
@@ -114,7 +112,6 @@ export function Escalations() {
   const byEntity = Object.entries((data.by_entity || {}) as Record<string, AnyRecord>).map(([name, v]) => ({ name, rate: v.rate, requiring: v.requiring }));
   return (
     <Page title="Escalation analytics" subtitle="The central supervisory control: did critical alerts reach the right owner?">
-      <Disclaimer />
       <FilterBar sectors={sectors} />
       <div className="kpis">
         <Card label="Requiring escalation" value={data.requiring_escalation} />
@@ -151,7 +148,6 @@ export function Monitoring() {
   const crit = Object.entries((data.by_entity || {}) as Record<string, AnyRecord>).map(([name, v]) => ({ name, assets: v.total_assets, gap: v.zero_activity }));
   return (
     <Page title="Monitoring coverage" subtitle="Expected monitoring vs observed asset activity">
-      <Disclaimer />
       <FilterBar sectors={sectors} />
       <div className="kpis">
         <Card label="Total assets" value={data.total_assets} />
@@ -185,7 +181,6 @@ export function Gaps() {
   const sevCount = (s: string) => items.filter((x) => String(x.severity).toLowerCase() === s).length;
   return (
     <Page title="Execution gaps" subtitle="Breaks between supervisory expectation and operational action">
-      <Disclaimer />
       <FilterBar sectors={sectors} />
       <div className="kpis">
         <Card label="Total gaps" value={data.total} />

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import { useFetch, useFilters, Page, Panel, Card, Table, Badge, Disclaimer, FilterBar,
+import { useFetch, useFilters, Page, Panel, Card, Table, Badge, FilterBar,
   Donut, Bars, RadarPlot, SEV_COLORS, type AnyRecord } from "../ui";
 import { patch, downloadReport } from "../api";
 
@@ -37,7 +37,6 @@ export function Findings() {
   }));
   return (
     <Page title="Findings" subtitle="Grouped by rule and entity — repeated signals collapsed with affected-record counts">
-      <Disclaimer />
       <FilterBar sectors={sectors} />
       <div className="filters">
         <label>Severity
@@ -65,7 +64,6 @@ export function FindingDetail() {
   if (error || !data) return <Page title="Finding evidence"><div className="state error-state"><b>Unable to load this view</b><span>{error}</span></div></Page>;
   return (
     <Page title={data.title || "Finding evidence"} subtitle={`${data.rule} · ${data.rule_version} · ${data.severity}`} actions={<Link className="button" to="/findings">Back to findings</Link>}>
-      <Disclaimer />
       <div className="kpis">
         <Card label="Severity" value={data.severity} tone={data.severity === "critical" ? "red" : ""} />
         <Card label="Entity" value={data.entity_id} />
@@ -110,7 +108,6 @@ export function Review() {
   }));
   return (
     <Page title="Review queue" subtitle="Actionable supervisory workflow — every action is audit-logged">
-      <Disclaimer />
       <div className="filters">
         <label>Severity<select value={sev} onChange={(e) => setSev(e.target.value)}><option value="">All</option>{["critical", "high", "medium", "low"].map((x) => <option key={x} value={x}>{x}</option>)}</select></label>
         <label>Status<select value={st} onChange={(e) => setSt(e.target.value)}><option value="">All</option>{["NEW", "IN_REVIEW", "VALIDATED", "REJECTED", "REQUIRES_EVIDENCE", "CLOSED"].map((x) => <option key={x} value={x}>{x}</option>)}</select></label>
@@ -137,7 +134,6 @@ export function Peer() {
   const pct = Object.entries(pc).map(([metric, v]: [string, any]) => ({ metric, percentile: v.percentile }));
   return (
     <Page title="Peer benchmark" subtitle="Entity vs sector median — deviation and percentile per metric">
-      <Disclaimer />
       <div className="filters">
         <label>Entity<select value={entity} onChange={(e) => setEntity(e.target.value)}>{entList.map((e) => <option key={e} value={e}>{e}</option>)}</select></label>
         {focus && <span className="meta-line">Sector <b>{focus.sector}</b>{comp && <> · Compliance <b>{comp.compliance_score}%</b> · Risk <b>{comp.risk_score}</b> · {comp.status}</>}</span>}
@@ -167,7 +163,6 @@ export function Quality() {
   }));
   return (
     <Page title="Data quality & reporting" subtitle="Schema completeness, validity, consistency, uniqueness, timeliness">
-      <Disclaimer />
       <FilterBar sectors={sectors} />
       <div className="kpis">
         <Card label="Overall score" value={`${o.overall}%`} />
@@ -204,7 +199,6 @@ export function Reports() {
   }
   return (
     <Page title="Reports" subtitle="Professional evidence-backed supervisory assessment">
-      <Disclaimer />
       <Panel title="Generate report" subtitle="Executive summary · scope · dataset & hash · compliance · sectors · critical/high findings · gaps · data quality · entity assessments · actions · evidence references · methodology · rule version · limitations">
         <div className="report-options">
           <label>Output format

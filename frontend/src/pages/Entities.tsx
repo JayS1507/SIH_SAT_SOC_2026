@@ -1,5 +1,5 @@
 import { Link, useParams } from "react-router-dom";
-import { useFetch, useFilters, Page, Panel, Card, Table, Disclaimer, FilterBar,
+import { useFetch, useFilters, Page, Panel, Card, Table, FilterBar,
   Donut, Bars, Trend, RadarPlot, FunnelView, STATUS_COLORS, type AnyRecord } from "../ui";
 
 export function Entities() {
@@ -19,7 +19,6 @@ export function Entities() {
   }));
   return (
     <Page title="Entities" subtitle="Compliance, risk and evidence coverage per assessed entity">
-      <Disclaimer />
       <FilterBar showStatus sectors={sectors} />
       <Panel>
         <Table
@@ -59,7 +58,6 @@ export function EntityDetail() {
 
   return (
     <Page title={c.entity_name || id} subtitle={`Entity ${id} · Sector ${c.sector || "—"} · Assessment period 2026-01 to 2026-09`} actions={<Link className="button" to="/entities">Back to entities</Link>}>
-      <Disclaimer />
       <div className="kpis">
         <Card label="Overall status" value={c.status} tone={c.status === "COMPLIANT" ? "green" : c.status === "NON_COMPLIANT" ? "red" : "amber"} />
         <Card label="Compliance score" value={`${c.compliance_score}%`} hint={`${c.compliant}C/${c.partially_compliant}P/${c.non_compliant}N/${c.insufficient_evidence}I of ${c.controls_assessed}`} />

@@ -69,14 +69,6 @@ export function Panel({ title, subtitle, children, className = "" }: { title?: s
   );
 }
 
-export function Disclaimer() {
-  return (
-    <div className="notice warn">
-      <b>SYNTHETIC DEMONSTRATION DATA.</b> Simulated SOC records created for demonstration and testing purposes.
-      This does not represent the actual cybersecurity posture, compliance status, incidents, or performance of the named organizations.
-    </div>
-  );
-}
 
 export function Table({ rows, columns, empty }: { rows: AnyRecord[]; columns: [string, string][]; empty?: string }) {
   return (

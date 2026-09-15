@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { useFetch, useFilters, Page, Panel, Card, Table, Badge, Disclaimer, FilterBar,
+import { useFetch, useFilters, Page, Panel, Card, Table, Badge, FilterBar,
   Donut, Bars, Trend, ScatterPlot, FunnelView, SEV_COLORS, STATUS_COLORS, type AnyRecord } from "../ui";
 
 export default function Overview() {
@@ -35,7 +35,6 @@ export default function Overview() {
 
   return (
     <Page title="Supervisory command overview" subtitle="Evidence-grounded assessment across critical-sector entities">
-      <Disclaimer />
       <FilterBar showStatus sectors={sectorNames} />
       <Panel title="Executive summary" subtitle="Deterministic synthesis of the current assessment — no generated text">
         <p className="summary">{data.executive_summary}</p>
