@@ -1,4 +1,4 @@
-export const API = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000/api/v1";
+export const API = import.meta.env.VITE_API_URL || "/api/v1";
 
 export async function get<T>(path: string, params?: Record<string, string | number | undefined>): Promise<T> {
   const entries = Object.entries(params || {}).filter(([, value]) => value !== undefined && value !== "") as [string, string][];

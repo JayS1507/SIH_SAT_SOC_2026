@@ -58,6 +58,68 @@ def _minutes_between(start: Any, end: Any) -> Optional[float]:
     return None
 
 
+def _num(value: Any) -> Optional[float]:
+    """Coerce CSV/XLSX numeric strings ("149", "5.0") to float; None if absent/invalid."""
+    if isinstance(value, bool) or value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).strip())
+    except ValueError:
+        return None
+
+
+# Free-text investigation notes are compared after case/whitespace
+# normalisation. A narrative counts as templated when the identical text is
+# reused for >= TEMPLATE_MIN_REPEATS investigations AND >= TEMPLATE_MIN_SHARE of
+# the entity's notes. Short notes (< TEMPLATE_MIN_WORDS words) are ignored so
+# legitimate fixed vocabularies ("benign", "false positive") are not flagged.
+TEMPLATE_MIN_REPEATS = 5
+TEMPLATE_MIN_SHARE = 0.10
+TEMPLATE_MIN_WORDS = 6
+NOTE_FIELDS = ("investigation_notes", "analyst_notes", "notes")
+
+
+def _derive_template_matches(investigations: list[dict[str, Any]]) -> None:
+    """Set template_match on investigations whose notes are reused verbatim.
+
+    An explicit truthy template_match supplied by the CSE is preserved.
+    """
+    by_entity: dict[str, list[tuple[dict[str, Any], str]]] = defaultdict(list)
+    for inv in investigations:
+        note = next((str(inv[f]) for f in NOTE_FIELDS if inv.get(f)), "")
+        norm = " ".join(note.lower().split())
+        if len(norm.split()) >= TEMPLATE_MIN_WORDS:
+            by_entity[str(inv.get("entity_id", ""))].append((inv, norm))
+    for items in by_entity.values():
+        counts = Counter(norm for _, norm in items)
+        for inv, norm in items:
+            if counts[norm] >= TEMPLATE_MIN_REPEATS and counts[norm] / len(items) >= TEMPLATE_MIN_SHARE:
+                inv["template_match"] = True
+
+
+def _period_submissions(periods_by_entity: dict[str, set[str]]) -> list[dict[str, Any]]:
+    """One record per entity per expected monthly reporting period.
+
+    The expected range spans every month observed anywhere in the dataset; a
+    month in which an entity reported nothing is an explicit "missing"
+    submission (negative space) rather than silently ignored.
+    """
+    observed = sorted(p for periods in periods_by_entity.values() for p in periods
+                      if len(p) == 7 and p[4] == "-" and p[:4].isdigit() and p[5:].isdigit())
+    if not observed:
+        return []
+    year, month = int(observed[0][:4]), int(observed[0][5:])
+    expected = []
+    while f"{year:04d}-{month:02d}" <= observed[-1]:
+        expected.append(f"{year:04d}-{month:02d}")
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+    return [{"submission_id": f"{eid}-{period}", "entity_id": eid, "reporting_period": period,
+             "status": "submitted" if period in periods_by_entity[eid] else "missing"}
+            for eid in sorted(periods_by_entity) for period in expected]
+
+
 def _month_key(ts_str: Any) -> Optional[str]:
     dt = _parse_ts(ts_str)
     if dt:
@@ -83,11 +145,19 @@ class SupervisoryAnalytics:
         self.responses = tables.get("responses", [])
         self.remediations = tables.get("remediations", [])
         self.submissions = tables.get("submissions", [])
+        # CSE self-assessment ("what the entity reports") for paper-vs-practice checks.
+        self.declarations = [d for d in tables.get("declarations", []) or []
+                             if d.get("entity_id") and d.get("metric")]
 
         # Build indexes
         self._alerts_by_entity: dict[str, list] = defaultdict(list)
         for a in self.alerts:
             self._alerts_by_entity[a["entity_id"]].append(a)
+
+        self._alert_by_case: dict[str, dict] = {}
+        for a in self.alerts:
+            if a.get("case_id"):
+                self._alert_by_case.setdefault(a["case_id"], a)
 
         self._cases_by_entity: dict[str, list] = defaultdict(list)
         self._cases_by_id: dict[str, dict] = {}
@@ -153,6 +223,7 @@ class SupervisoryAnalytics:
         escalations: list[dict[str, Any]] = []
         responses: list[dict[str, Any]] = []
         remediations: list[dict[str, Any]] = []
+        periods_by_entity: dict[str, set[str]] = defaultdict(set)
         for submission in submissions:
             rows = submission.get("records", [])
             if not isinstance(rows, list):
@@ -179,6 +250,9 @@ class SupervisoryAnalytics:
                     "criticality": row.get("criticality") or row.get("asset_criticality"),
                 })
                 timestamp = row.get("timestamp") or row.get("time")
+                period = str(row.get("reporting_period") or "")[:7] or _month_key(timestamp)
+                if period:
+                    periods_by_entity[eid].add(period)
                 aid = row.get("alert_id")
                 asset_id = row.get("asset_id")
                 if asset_id:
@@ -192,6 +266,8 @@ class SupervisoryAnalytics:
                     alerts.append({**row, "alert_id": str(aid or f"{sid}:row:{index}"),
                                    "entity_id": eid, "asset_id": asset_id,
                                    "timestamp": timestamp,
+                                   "category": row.get("category") or row.get("alert_category")
+                                   or row.get("alert_type") or "unknown",
                                    # Preserve missing classifications so data-quality
                                    # metrics do not turn absent evidence into a
                                    # fabricated medium-severity alert.
@@ -209,8 +285,8 @@ class SupervisoryAnalytics:
                     if not cases[cid].get("closure_reason"):
                         cases[cid]["closure_reason"] = row.get("closure_reason") or row.get("evidence_type")
                     if _row_is_investigated(row):
-                        ev_count = row.get("evidence_count")
-                        if not isinstance(ev_count, (int, float)):
+                        ev_count = _num(row.get("evidence_count"))
+                        if ev_count is None:
                             if isinstance(row.get("evidence"), list):
                                 ev_count = len(row.get("evidence", []))
                             elif str(row.get("evidence_present", "")).lower() in ("true", "1", "yes"):
@@ -225,8 +301,14 @@ class SupervisoryAnalytics:
                                          "start_time": row.get("investigation_started") or row.get("start_time"),
                                          "analyst_id": row.get("analyst_id") or row.get("analyst"),
                                          "evidence_count": ev_count,
-                                         "template_match": row.get("template_match", False)}
-                        duration = row.get("investigation_minutes") or row.get("duration_minutes")
+                                         "entity_id": eid,
+                                         "template_match": str(row.get("template_match", "")).lower() in ("true", "1", "yes")}
+                        duration = next((d for d in (_num(row.get(k)) for k in (
+                            "investigation_duration_minutes", "investigation_minutes", "duration_minutes"))
+                            if d is not None), None)
+                        if duration is None:
+                            # Derive from timestamps when the CSE did not report a duration.
+                            duration = _minutes_between(investigation["start_time"], investigation["end_time"])
                         if duration is not None:
                             investigation["duration_minutes"] = duration
                         investigations.append(investigation)
@@ -248,7 +330,11 @@ class SupervisoryAnalytics:
             # Preserve the source submission in the normalized view while
             # making its entity association explicit for completeness metrics.
             submission["_entity_ids"] = submission_entities
+        _derive_template_matches(investigations)
         derived = dict(tables)
+        period_submissions = _period_submissions(periods_by_entity)
+        if period_submissions:
+            derived["submissions"] = period_submissions
         derived.update({
             "entities": sorted(entities.values(), key=lambda x: x["entity_id"]),
             "assets": sorted(assets.values(), key=lambda x: x["asset_id"]),
@@ -656,7 +742,25 @@ class SupervisoryAnalytics:
     # EXECUTION GAP SIGNALS
     # -----------------------------------------------------------------------
 
+    def _memo(self, key: str, compute: Any) -> Any:
+        cache = self.__dict__.setdefault("_cache", {})
+        if key not in cache:
+            cache[key] = compute()
+        return cache[key]
+
     def all_execution_gaps(self) -> list[dict[str, Any]]:
+        # Signals are recomputed by many views; cache per engine instance and
+        # hand out copies so callers can annotate them freely.
+        return [dict(s) for s in self._memo("eg", self._compute_execution_gaps)]
+
+    def all_negative_space(self) -> list[dict[str, Any]]:
+        return [dict(s) for s in self._memo("ns", self._compute_negative_space)]
+
+    def peer_benchmark(self) -> dict[str, Any]:
+        import copy
+        return copy.deepcopy(self._memo("peer", self._compute_peer_benchmark))
+
+    def _compute_execution_gaps(self) -> list[dict[str, Any]]:
         signals: list[dict[str, Any]] = []
 
         for eid, entity in self.entities.items():
@@ -677,6 +781,7 @@ class SupervisoryAnalytics:
                     "Investigation", len(critical_fast),
                     f"{len(critical_fast)} critical cases with investigation ≤10 minutes",
                     "Critical cases typically require thorough investigation",
+                    sample_ids=critical_fast,
                 ))
 
             # 2. Cases closed without investigation evidence
@@ -689,7 +794,7 @@ class SupervisoryAnalytics:
                     "Investigation", len(no_inv),
                     f"{len(no_inv)} cases ({rate}%) lack investigation records",
                     "Cases should have documented investigation evidence",
-                    observed=rate, expected=5.0,
+                    observed=rate, expected=5.0, sample_ids=[c["case_id"] for c in no_inv],
                 ))
 
             # 3. Investigations without conclusion
@@ -703,6 +808,7 @@ class SupervisoryAnalytics:
                     "Investigation", len(no_conclusion),
                     f"{len(no_conclusion)} investigations lack a conclusion",
                     "Investigations should document findings and conclusions",
+                    sample_ids=[c["case_id"] for c in no_conclusion],
                 ))
 
             # 4. Escalation required but no escalation evidence
@@ -719,6 +825,7 @@ class SupervisoryAnalytics:
                     f"{len(missing_esc)} alerts ({rate}%) requiring escalation have no escalation record",
                     "Escalation-required alerts should have escalation evidence",
                     observed=rate, expected=8.0,
+                    sample_ids=[a.get("case_id") or a["alert_id"] for a in missing_esc],
                 ))
 
             # 5. Escalation without response
@@ -734,6 +841,7 @@ class SupervisoryAnalytics:
                     "Incident Response", len(esc_no_resp),
                     f"{len(esc_no_resp)} escalated cases lack response records",
                     "Escalated cases should have documented response actions",
+                    sample_ids=esc_no_resp,
                 ))
 
             # 6. Repeated alerts on same asset without remediation
@@ -756,6 +864,7 @@ class SupervisoryAnalytics:
                     "Cyber Resilience", len(unremediated),
                     f"{len(unremediated)} assets with repeated critical/high alerts lack remediation",
                     "Recurring alerts should show root-cause remediation",
+                    sample_ids=unremediated,
                 ))
 
             # 7. Template investigation pattern
@@ -774,6 +883,7 @@ class SupervisoryAnalytics:
                         f"{len(template_invs)} investigations ({rate}%) use identical template text",
                         "Investigation narratives should reflect case-specific analysis",
                         observed=rate, expected=10.0,
+                        sample_ids=[i["case_id"] for i in template_invs],
                     ))
 
             # 8. Fast closure combined with low evidence
@@ -789,15 +899,19 @@ class SupervisoryAnalytics:
                     "Operational Discipline", len(fast_low_evidence),
                     f"{len(fast_low_evidence)} cases closed in ≤15 minutes with ≤1 evidence item",
                     "Quick closures should still contain adequate evidence",
+                    sample_ids=fast_low_evidence,
                 ))
 
+        signals.extend(self._sla_gaming_signals())
+        signals.extend(self._analyst_concentration_signals())
+        signals.extend(self._declared_gap_signals())
         return signals
 
     # -----------------------------------------------------------------------
     # NEGATIVE SPACE SIGNALS
     # -----------------------------------------------------------------------
 
-    def all_negative_space(self) -> list[dict[str, Any]]:
+    def _compute_negative_space(self) -> list[dict[str, Any]]:
         signals: list[dict[str, Any]] = []
 
         for eid, entity in self.entities.items():
@@ -863,13 +977,336 @@ class SupervisoryAnalytics:
                         observed=round(inv_coverage, 1), expected=75.0,
                     ))
 
+        signals.extend(self._peer_outlier_signals())
+        signals.extend(self._missing_category_signals())
+        signals.extend(self._off_hours_signals())
         return signals
+
+    # Robust (median/MAD) z-score; |z| > 3.5 is the Iglewicz-Hoaglin outlier cut-off.
+    OUTLIER_Z = 3.5
+    OUTLIER_METRICS = {
+        "investigation_coverage": ("Investigation", "Investigation coverage"),
+        "escalation_rate": ("Escalation", "Escalation of required alerts"),
+        "response_coverage": ("Incident Response", "Response to escalations"),
+        "monitoring_coverage": ("Security Operations", "Monitored asset coverage"),
+        "evidence_completeness": ("Investigation", "Evidence completeness"),
+    }
+
+    def _peer_outlier_signals(self) -> list[dict[str, Any]]:
+        """Flag entities whose control metrics sit far *below* the peer population.
+
+        Unlike fixed thresholds this adapts to whatever the peer population
+        actually achieves, so it surfaces previously unknown weaknesses.
+        """
+        if len(self.entities) < 5:
+            return []
+        metrics = self.peer_benchmark()["entities"]
+        signals: list[dict[str, Any]] = []
+        for mk, (capability, label) in self.OUTLIER_METRICS.items():
+            values = {eid: m[mk] for eid, m in metrics.items()
+                      if m.get(mk) is not None and m.get("alert_volume", 0) > 0}
+            if len(values) < 5:
+                continue
+            median = statistics.median(values.values())
+            mad = statistics.median(abs(v - median) for v in values.values())
+            # When most peers share the same value the MAD is 0; fall back to the
+            # mean absolute deviation (scaled to be comparable with 0.6745/MAD).
+            scale = mad / 0.6745 if mad else 1.253314 * statistics.fmean(
+                abs(v - median) for v in values.values())
+            if scale == 0:
+                continue
+            for eid, value in values.items():
+                z = (value - median) / scale
+                if z <= -self.OUTLIER_Z:
+                    signals.append(self._make_signal(
+                        f"NS-PEER-OUTLIER-{mk.upper().replace('_', '-')}", "high", eid,
+                        f"{label} is a statistical outlier below peer entities",
+                        capability, 1,
+                        f"{label} {value}% vs peer median {round(median, 1)}% "
+                        f"(robust z = {round(z, 2)}, threshold -{self.OUTLIER_Z})",
+                        "Comparable entities achieve materially higher levels of this control",
+                        observed=value, expected=round(median, 1),
+                    ))
+        return signals
+
+    def _missing_category_signals(self) -> list[dict[str, Any]]:
+        """Alert categories most peers report but this entity never reports."""
+        cats_by_entity = {eid: {a.get("category") for a in self._alerts_by_entity.get(eid, [])}
+                          - {None, "", "unknown"} for eid in self.entities}
+        signals: list[dict[str, Any]] = []
+        for eid, entity in self.entities.items():
+            if len(self._alerts_by_entity.get(eid, [])) < 20:
+                continue  # too little data to judge absence; NS-LOW-VOLUME covers it
+            sector = entity.get("sector")
+            # Category mix is sector-specific, so only same-sector peers are comparable.
+            peers = [e for e, ent in self.entities.items()
+                     if e != eid and cats_by_entity[e] and sector and ent.get("sector") == sector]
+            if len(peers) < 3:
+                continue
+            counts = Counter(c for e in peers for c in cats_by_entity[e])
+            expected = {c for c, n in counts.items() if n / len(peers) >= 0.75}
+            missing = sorted(expected - cats_by_entity[eid])
+            if missing:
+                signals.append(self._make_signal(
+                    "NS-MISSING-CATEGORY", "medium", eid,
+                    "Expected alert categories are absent compared with peers",
+                    "Threat Detection", len(missing),
+                    f"No alerts in {len(missing)} categories reported by >=75% of {len(peers)} {sector} peers: "
+                    + ", ".join(missing[:8]),
+                    "Detection coverage should include categories observed across comparable entities",
+                    observed=0, expected=len(missing),
+                ))
+        return signals
+
+    # -----------------------------------------------------------------------
+    # BEHAVIOURAL FORENSICS (metric gaming, workload, temporal blind spots)
+    # -----------------------------------------------------------------------
+
+    SLA_MINUTES = 240          # critical/high resolution SLA used for KPI reporting
+    SLA_BAND = 0.15            # compare the 15% window just inside vs just outside the SLA
+    LOCAL_UTC_OFFSET_MIN = 330  # IST; "night" = 00:00-06:59 local time
+
+    def _resolution_minutes(self, case: dict[str, Any]) -> Optional[float]:
+        alert = self._alert_by_case.get(case["case_id"]) or {}
+        return _minutes_between(alert.get("timestamp") or case.get("created_at"), case.get("closed_at"))
+
+    def _sla_gaming_signals(self) -> list[dict[str, Any]]:
+        """Use case (viii): closures bunch just inside the SLA - the metric, not the risk, drives closure."""
+        signals = []
+        lo = self.SLA_MINUTES * (1 - self.SLA_BAND)
+        hi = self.SLA_MINUTES * (1 + self.SLA_BAND)
+        for eid in self.entities:
+            inside, outside, total = [], [], 0
+            for c in self._cases_by_entity.get(eid, []):
+                if c.get("priority") not in ("critical", "high"):
+                    continue
+                minutes = self._resolution_minutes(c)
+                if minutes is None:
+                    continue
+                total += 1
+                if lo <= minutes < self.SLA_MINUTES:
+                    inside.append(c["case_id"])
+                elif self.SLA_MINUTES <= minutes < hi:
+                    outside.append(c["case_id"])
+            if total < 30 or len(inside) < 8:
+                continue
+            ratio = len(inside) / max(len(outside), 1)
+            share = len(inside) / total
+            if ratio >= 3 and share >= 0.10:
+                signals.append(self._make_signal(
+                    "EG-SLA-GAMING", "high", eid,
+                    "Case closures cluster just inside the SLA deadline (metric gaming)",
+                    "Operational Discipline", len(inside),
+                    f"{len(inside)} critical/high cases ({round(share * 100, 1)}%) closed in the "
+                    f"{round(self.SLA_MINUTES - lo)} min before the {self.SLA_MINUTES}-min SLA vs "
+                    f"{len(outside)} just after it ({round(ratio, 1)}x). Natural workloads show no cliff at the deadline.",
+                    "Closure timing should follow investigation completion, not the reporting threshold",
+                    observed=round(ratio, 1), expected=1.0, sample_ids=inside,
+                    intensity=min(1.0, share / 0.3),
+                ))
+        return signals
+
+    def _analyst_concentration_signals(self) -> list[dict[str, Any]]:
+        """Use case (ix) + resilience: one analyst carries an implausible share of investigations."""
+        signals = []
+        by_entity: dict[str, Counter] = defaultdict(Counter)
+        for inv in self.investigations:
+            eid = self._cases_by_id.get(inv["case_id"], {}).get("entity_id")
+            if eid and inv.get("analyst_id"):
+                by_entity[eid][str(inv["analyst_id"])] += 1
+        for eid, counts in by_entity.items():
+            total = sum(counts.values())
+            if total < 40 or len(counts) < 3:
+                continue
+            analyst, top = counts.most_common(1)[0]
+            share = top / total
+            if share >= 0.5:
+                fair = round(100 / len(counts), 1)
+                signals.append(self._make_signal(
+                    "EG-ANALYST-CONCENTRATION", "medium", eid,
+                    "Investigation workload concentrated on a single analyst",
+                    "Cyber Resilience", top,
+                    f"{analyst} handled {top} of {total} investigations ({round(share * 100, 1)}%) "
+                    f"across {len(counts)} analysts (even split ≈ {fair}%). Indicates key-person "
+                    "dependency or investigations recorded under one login.",
+                    "Investigation workload should be distributed; records should identify the actual analyst",
+                    observed=round(share * 100, 1), expected=fair,
+                    sample_ids=[i["case_id"] for i in self.investigations
+                                if str(i.get("analyst_id")) == analyst][:15],
+                    intensity=min(1.0, (share - 0.3) / 0.5),
+                ))
+        return signals
+
+    def _off_hours_signals(self) -> list[dict[str, Any]]:
+        """Negative space: no night-time detections while peers detect around the clock."""
+        night_share: dict[str, tuple[float, int]] = {}
+        for eid in self.entities:
+            hours = []
+            for a in self._alerts_by_entity.get(eid, []):
+                ts = _parse_ts(a.get("timestamp"))
+                if ts:
+                    local_min = (ts.hour * 60 + ts.minute + self.LOCAL_UTC_OFFSET_MIN) % 1440
+                    hours.append(local_min < 7 * 60)
+            if len(hours) >= 100:
+                night_share[eid] = (sum(hours) / len(hours), len(hours))
+        if len(night_share) < 5:
+            return []
+        median = statistics.median(v for v, _ in night_share.values())
+        signals = []
+        for eid, (share, n) in night_share.items():
+            if median >= 0.10 and share < median * 0.25:
+                signals.append(self._make_signal(
+                    "NS-OFFHOURS-BLIND", "high", eid,
+                    "Little or no detection activity outside business hours",
+                    "Threat Detection", 1,
+                    f"Only {round(share * 100, 1)}% of {n} alerts fall between 00:00-07:00 IST vs peer "
+                    f"median {round(median * 100, 1)}%. Monitoring appears not to operate 24x7.",
+                    "Critical infrastructure monitoring should produce detections around the clock",
+                    observed=round(share * 100, 1), expected=round(median * 100, 1),
+                ))
+        return signals
+
+    # -----------------------------------------------------------------------
+    # PAPER vs PRACTICE (declared self-assessment vs operational evidence)
+    # -----------------------------------------------------------------------
+
+    DECLARABLE_METRICS = {
+        "investigation_coverage": "Investigation coverage",
+        "escalation_rate": "Escalation compliance",
+        "response_coverage": "Response to escalations",
+        "monitoring_coverage": "Monitored asset coverage",
+        "evidence_completeness": "Evidence completeness",
+    }
+    DECLARED_GAP_POINTS = 15.0
+
+    def declared_vs_observed(self, entity_id: str | None = None) -> list[dict[str, Any]]:
+        observed = self.peer_benchmark()["entities"]
+        rows = []
+        for d in self.declarations:
+            eid, metric = str(d["entity_id"]), str(d["metric"])
+            if entity_id and eid != entity_id:
+                continue
+            declared = _num(d.get("declared_value"))
+            obs = observed.get(eid, {}).get(metric)
+            if declared is None or metric not in self.DECLARABLE_METRICS:
+                continue
+            gap = None if obs is None else round(declared - obs, 1)
+            verdict = ("UNVERIFIABLE" if gap is None else "OVERSTATED" if gap >= self.DECLARED_GAP_POINTS
+                       else "MINOR_VARIANCE" if gap >= 5 else "CONSISTENT")
+            rows.append({"entity_id": eid,
+                         "entity_name": self.entities.get(eid, {}).get("entity_name", eid),
+                         "metric": metric, "label": self.DECLARABLE_METRICS[metric],
+                         "declared": round(declared, 1), "observed": obs, "gap": gap, "verdict": verdict,
+                         "source": d.get("source", "self-assessment")})
+        return sorted(rows, key=lambda r: (-(r["gap"] or -999), r["entity_id"], r["metric"]))
+
+    def _declared_gap_signals(self) -> list[dict[str, Any]]:
+        if not self.declarations:
+            return []
+        by_entity: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in self.declared_vs_observed():
+            if row["verdict"] == "OVERSTATED" and row["entity_id"] in self.entities:
+                by_entity[row["entity_id"]].append(row)
+        signals = []
+        for eid, rows in by_entity.items():
+            worst = max(r["gap"] for r in rows)
+            detail = "; ".join(f"{r['label']} declared {r['declared']}% vs evidenced {r['observed']}%"
+                               for r in rows)
+            signals.append(self._make_signal(
+                "EG-DECLARED-GAP", "critical" if worst >= 30 else "high", eid,
+                "Self-reported control performance is not supported by operational evidence",
+                "Governance & Oversight", len(rows),
+                f"{len(rows)} declared metric(s) overstated by up to {worst} points: {detail}",
+                "Reported capability should match what the submitted evidence demonstrates",
+                observed=worst, expected=self.DECLARED_GAP_POINTS,
+                intensity=min(1.0, worst / 50),
+            ))
+        return signals
+
+    # -----------------------------------------------------------------------
+    # EXAMINATION PLAN (what the supervisor should ask / pull next)
+    # -----------------------------------------------------------------------
+
+    EXAM_QUESTIONS = {
+        "EG-FAST-CRITICAL": ("How were these critical alerts ruled out in under 10 minutes?",
+                             "Full investigation notes, queries run and evidence for the listed cases"),
+        "EG-NO-INV": ("Why were these cases closed without an investigation record?",
+                      "Case history and closure approvals for the listed cases"),
+        "EG-NO-CONCLUSION": ("Who approved closing investigations with no documented conclusion?",
+                             "Closure approval workflow and reviewer sign-off"),
+        "EG-MISSING-ESC": ("Why were escalation-required alerts not escalated?",
+                           "Escalation policy, on-call roster and escalation log for the period"),
+        "EG-ESC-NO-RESP": ("What response followed these escalations?",
+                           "Incident response tickets and containment records for the listed cases"),
+        "EG-REPEATED-NO-REM": ("What root-cause remediation was done for repeatedly alerting assets?",
+                               "Change/patch records and problem tickets for the listed assets"),
+        "EG-TEMPLATE": ("Why do many investigations carry identical narrative text?",
+                        "Analyst work logs and tool query history for the listed cases"),
+        "EG-FAST-LOW-EVIDENCE": ("What evidence supported these quick closures?",
+                                 "Evidence artefacts attached to the listed cases"),
+        "EG-SLA-GAMING": ("Are cases being closed to meet the SLA rather than on investigation completion?",
+                          "Case timelines with reopen history; SLA reporting methodology"),
+        "EG-ANALYST-CONCENTRATION": ("Is one analyst genuinely performing this workload, or are shared logins used?",
+                                     "SOC staffing roster, shift logs and user-to-analyst mapping"),
+        "EG-DECLARED-GAP": ("How were the self-reported KPIs calculated, and from which data?",
+                            "KPI calculation method, source queries and management reports"),
+        "NS-MISSING-SUB": ("Why were no records submitted for these reporting periods?",
+                           "Records for the missing months or a written explanation"),
+        "NS-CRIT-UNMONITORED": ("Are these critical assets onboarded to monitoring?",
+                                "Log source inventory and onboarding status for critical assets"),
+        "NS-LOW-VOLUME": ("Why is alert volume far below comparable entities?",
+                          "Detection rule inventory and log source coverage"),
+        "NS-LOW-INV": ("How are cases triaged when no investigation is recorded?",
+                       "Triage procedure and case sampling evidence"),
+        "NS-MISSING-CATEGORY": ("Which detections cover the alert categories peers routinely report?",
+                                "Use-case / detection rule catalogue mapped to threat categories"),
+        "NS-OFFHOURS-BLIND": ("Is the SOC staffed and monitoring 24x7?",
+                              "Shift roster, after-hours alert handling procedure, night-time log samples"),
+    }
+
+    def examination_plan(self, entity_id: str) -> dict[str, Any]:
+        """Deterministic, evidence-linked request list for an on-site examination."""
+        if entity_id not in self.entities:
+            return {}
+        sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        signals = [s for s in self.all_execution_gaps() + self.all_negative_space()
+                   if s["entity_id"] == entity_id]
+        cases = len(self._cases_by_entity.get(entity_id, []))
+
+        def weight(sig: dict[str, Any]) -> float:
+            if sig.get("intensity") is not None:
+                return sig["intensity"]
+            if sig["category"] == "execution_gap":
+                return min(1.0, sig.get("affected_count", 0) / max(cases, 1) / self.RISK_FULL_RATE)
+            return 1.0
+
+        signals.sort(key=lambda s: (sev_rank.get(s["severity"], 4), -weight(s), s["rule"]))
+        items = []
+        for sig in signals:
+            key = next((k for k in self.EXAM_QUESTIONS if sig["rule"].startswith(k)), None)
+            question, request = self.EXAM_QUESTIONS.get(key, (
+                f"Explain: {sig['finding'].lower()}", "Supporting records for the affected items"))
+            items.append({"rule": sig["rule"], "severity": sig["severity"], "finding": sig["finding"],
+                          "evidence": sig["description"], "question": question, "request": request,
+                          "capability": sig["capability"], "sample_ids": sig.get("sample_ids", []),
+                          "weight": round(weight(sig), 2)})
+        risk = next((r for r in self.all_entity_risk_scores() if r["entity_id"] == entity_id), {})
+        sample = self.recommended_sample(entity_id, target_size=25, control_size=5)
+        return {"entity_id": entity_id,
+                "entity_name": self.entities[entity_id].get("entity_name", entity_id),
+                "risk_score": risk.get("risk_score"), "risk_level": risk.get("risk_level"),
+                "focus_areas": items[:10],
+                "declared_vs_observed": self.declared_vs_observed(entity_id),
+                "case_sample": sample["targeted_sample"], "control_sample": sample["control_sample"],
+                "note": "Generated deterministically from evidence; supports, not replaces, examiner judgement."}
 
     def _make_signal(self, rule: str, severity: str, entity_id: str,
                      finding: str, capability: str, affected_count: int,
                      description: str, expected_behavior: str,
-                     observed: Any = None, expected: Any = None) -> dict[str, Any]:
-        return {
+                     observed: Any = None, expected: Any = None,
+                     sample_ids: list[str] | None = None,
+                     intensity: float | None = None) -> dict[str, Any]:
+        signal = {
             "id": f"{rule}-{entity_id}",
             "rule": rule,
             "severity": severity,
@@ -885,13 +1322,18 @@ class SupervisoryAnalytics:
             "confidence": "high" if affected_count > 10 else "medium" if affected_count > 3 else "low",
             "rule_version": "sat-sa-1.0",
             "category": "execution_gap" if rule.startswith("EG-") else "negative_space",
+            # Concrete records the examiner can pull first (drill-down / request list).
+            "sample_ids": sorted({str(x) for x in (sample_ids or []) if x})[:15],
         }
+        if intensity is not None:
+            signal["intensity"] = round(max(0.0, min(1.0, intensity)), 3)
+        return signal
 
     # -----------------------------------------------------------------------
     # PEER BENCHMARKING
     # -----------------------------------------------------------------------
 
-    def peer_benchmark(self) -> dict[str, Any]:
+    def _compute_peer_benchmark(self) -> dict[str, Any]:
         """Compare entities within same sector."""
         entity_metrics: dict[str, dict[str, Any]] = {}
         for eid in self.entities:
@@ -922,8 +1364,10 @@ class SupervisoryAnalytics:
             critical_rate = sum(1 for a in alerts if a["severity"] == "critical") / max(total_alerts, 1) * 100
 
             # Response coverage
-            resp_count = sum(1 for c in cases if c["case_id"] in self._resp_by_case)
-            resp_cov = resp_count / max(total_cases, 1) * 100
+            # Responses follow escalations, so coverage is measured over escalated cases.
+            escalated = [c for c in cases if c["case_id"] in self._esc_by_case]
+            resp_count = sum(1 for c in escalated if c["case_id"] in self._resp_by_case)
+            resp_cov = resp_count / max(len(escalated), 1) * 100
 
             entity_metrics[eid] = {
                 "entity_id": eid,
@@ -1209,6 +1653,33 @@ class SupervisoryAnalytics:
     # ENTITY RISK SCORING
     # -----------------------------------------------------------------------
 
+    # Severity sets how much one fully-expressed signal moves the score; an
+    # execution gap is fully expressed once it affects RISK_FULL_RATE of cases.
+    RISK_SEVERITY = {"critical": 1.0, "high": 0.6, "medium": 0.3, "low": 0.1}
+    RISK_FULL_RATE = 0.15
+    RISK_TIERS = ((60, "CRITICAL"), (40, "HIGH"), (25, "MODERATE"))
+
+    @classmethod
+    def risk_level(cls, score: float) -> str:
+        return next((tier for cut, tier in cls.RISK_TIERS if score >= cut), "LOW")
+
+    def _signal_exposure(self, signals: list[dict[str, Any]], case_count: int) -> float:
+        """0-100 noisy-OR of signal intensities.
+
+        Execution-gap intensity is the share of the entity's cases affected;
+        negative-space signals are already threshold/peer tests so count fully.
+        """
+        keep = 1.0
+        for sig in signals:
+            intensity = 1.0
+            if sig.get("intensity") is not None:
+                intensity = sig["intensity"]
+            elif sig["category"] == "execution_gap":
+                rate = sig.get("affected_count", 0) / max(case_count, 1)
+                intensity = min(1.0, rate / self.RISK_FULL_RATE)
+            keep *= 1 - self.RISK_SEVERITY.get(sig["severity"], 0.1) * intensity
+        return 100.0 * (1 - keep)
+
     def all_entity_risk_scores(self) -> list[dict[str, Any]]:
         exec_gaps = self.all_execution_gaps()
         neg_space = self.all_negative_space()
@@ -1222,10 +1693,8 @@ class SupervisoryAnalytics:
             eg_count = sum(1 for s in exec_gaps if s["entity_id"] == eid)
             ns_count = sum(1 for s in neg_space if s["entity_id"] == eid)
 
-            # Severity-weighted signal burden
-            sev_weight = {"critical": 12, "high": 7, "medium": 3, "low": 1}
-            eg_burden = sum(sev_weight.get(s["severity"], 1) for s in exec_gaps if s["entity_id"] == eid)
-            ns_burden = sum(sev_weight.get(s["severity"], 1) for s in neg_space if s["entity_id"] == eid)
+            entity_signals = [sig for sig in exec_gaps + neg_space if sig["entity_id"] == eid]
+            entity_cases = len(self._cases_by_entity.get(eid, []))
 
             # Peer deviation penalty
             peer_penalty = 0
@@ -1244,29 +1713,30 @@ class SupervisoryAnalytics:
                 if score < 60:
                     cap_penalty += (60 - score) * 0.3
 
-            # Normalize each bounded component before combining them. This
-            # keeps the ceiling a property of the formula rather than a
-            # post-hoc clipping operation.
-            execution_component = 100.0 * eg_burden / max(eg_count * 12, 1)
-            negative_component = 100.0 * ns_burden / max(ns_count * 12, 1)
+            # Signal components are magnitude-aware (share of cases affected)
+            # and combined with a saturating noisy-OR, so they stay in 0-100.
+            # Overstated self-reporting is scored separately so it cannot swamp
+            # the operational evidence (0 when no declarations were supplied).
+            declared = [sig for sig in entity_signals if sig["rule"] == "EG-DECLARED-GAP"]
+            integrity_component = max((100.0 * sig.get("intensity", 1.0) for sig in declared), default=0.0)
+            entity_signals = [sig for sig in entity_signals if sig["rule"] != "EG-DECLARED-GAP"]
+            execution_component = self._signal_exposure(
+                [sig for sig in entity_signals if sig["category"] == "execution_gap"], entity_cases)
+            negative_component = self._signal_exposure(
+                [sig for sig in entity_signals if sig["category"] != "execution_gap"], entity_cases)
             peer_component = peer_penalty / max(len(peer_data["entities"].get(eid, {}).get("peer_comparison", {})), 1)
             capability_component = cap_penalty / max(len(all_caps.get(eid, {})) * 0.3 * 60, 1)
             score = round(
-                execution_component * 0.35
-                + negative_component * 0.25
+                execution_component * 0.45
+                + negative_component * 0.20
                 + peer_component * 0.20
-                + capability_component * 0.20,
+                + capability_component * 0.15
+                + integrity_component * 0.10,
                 1,
             )
+            score = min(100.0, score)
 
-            if score >= 70:
-                risk_level = "CRITICAL"
-            elif score >= 45:
-                risk_level = "HIGH"
-            elif score >= 20:
-                risk_level = "MODERATE"
-            else:
-                risk_level = "LOW"
+            risk_level = self.risk_level(score)
 
             results.append({
                 "entity_id": eid,
@@ -1275,10 +1745,11 @@ class SupervisoryAnalytics:
                 "risk_score": score,
                 "risk_level": risk_level,
                 "contributors": {
-                    "Execution gaps": round(execution_component * 0.35, 1),
-                    "Negative space": round(negative_component * 0.25, 1),
+                    "Execution gaps": round(execution_component * 0.45, 1),
+                    "Negative space": round(negative_component * 0.20, 1),
                     "Peer deviation": round(peer_component * 0.20, 1),
-                    "Capability weakness": round(capability_component * 0.20, 1),
+                    "Capability weakness": round(capability_component * 0.15, 1),
+                    "Reporting integrity": round(integrity_component * 0.10, 1),
                 },
                 "execution_gap_count": eg_count,
                 "negative_space_count": ns_count,
@@ -1366,6 +1837,44 @@ class SupervisoryAnalytics:
     # SAMPLE PRIORITIZATION
     # -----------------------------------------------------------------------
 
+    def case_priority(self, c: dict[str, Any]) -> tuple[float, list[str]]:
+        """Explainable review priority for one case (higher = review first)."""
+        priority = 0.0
+        reasons: list[str] = []
+        case_id = c["case_id"]
+        if c.get("priority") == "critical":
+            priority += 30
+            reasons.append("Critical severity")
+        elif c.get("priority") == "high":
+            priority += 15
+            reasons.append("High severity")
+        inv = self._inv_by_case.get(case_id)
+        if inv and inv.get("duration_minutes", 999) <= 10:
+            priority += 25
+            reasons.append(f"Very fast investigation ({inv['duration_minutes']}min)")
+        alert = self._alert_by_case.get(case_id)
+        if alert and alert.get("escalation_required") and not alert.get("escalation_id"):
+            priority += 20
+            reasons.append("Missing escalation evidence")
+        if case_id not in self._inv_by_case:
+            priority += 15
+            reasons.append("No investigation record")
+        if inv and inv.get("template_match"):
+            priority += 10
+            reasons.append("Template investigation pattern")
+        if inv and inv.get("evidence_count", 99) <= 1:
+            priority += 10
+            reasons.append("Low evidence depth")
+        if case_id in self._esc_by_case and case_id not in self._resp_by_case:
+            priority += 15
+            reasons.append("Escalated without response")
+        resolution = self._resolution_minutes(c)
+        if (resolution is not None and c.get("priority") in ("critical", "high")
+                and self.SLA_MINUTES * (1 - self.SLA_BAND) <= resolution < self.SLA_MINUTES):
+            priority += 5
+            reasons.append(f"Closed just inside SLA ({round(resolution)} of {self.SLA_MINUTES} min)")
+        return priority, reasons
+
     def recommended_sample(self, entity_id: str | None = None, target_size: int = 80, control_size: int = 20) -> dict[str, Any]:
         if entity_id:
             cases = self._cases_by_entity.get(entity_id, [])
@@ -1373,52 +1882,8 @@ class SupervisoryAnalytics:
             cases = self.cases
 
         scored: list[tuple[float, dict[str, Any], list[str]]] = []
-
         for c in cases:
-            priority = 0.0
-            reasons: list[str] = []
-            case_id = c["case_id"]
-
-            # Severity
-            if c.get("priority") == "critical":
-                priority += 30
-                reasons.append("Critical severity")
-            elif c.get("priority") == "high":
-                priority += 15
-                reasons.append("High severity")
-
-            # Fast investigation
-            inv = self._inv_by_case.get(case_id)
-            if inv and inv.get("duration_minutes", 999) <= 10:
-                priority += 25
-                reasons.append(f"Very fast investigation ({inv['duration_minutes']}min)")
-
-            # Missing escalation
-            alert = next((a for a in self.alerts if a.get("case_id") == case_id), None)
-            if alert and alert.get("escalation_required") and not alert.get("escalation_id"):
-                priority += 20
-                reasons.append("Missing escalation evidence")
-
-            # No investigation
-            if case_id not in self._inv_by_case:
-                priority += 15
-                reasons.append("No investigation record")
-
-            # Template investigation
-            if inv and inv.get("template_match"):
-                priority += 10
-                reasons.append("Template investigation pattern")
-
-            # Low evidence
-            if inv and inv.get("evidence_count", 99) <= 1:
-                priority += 10
-                reasons.append("Low evidence depth")
-
-            # No response for escalated case
-            if case_id in self._esc_by_case and case_id not in self._resp_by_case:
-                priority += 15
-                reasons.append("Escalated without response")
-
+            priority, reasons = self.case_priority(c)
             if reasons:
                 scored.append((priority, c, reasons))
 

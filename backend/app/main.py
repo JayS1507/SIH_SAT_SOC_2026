@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import re
+import os
 import statistics
 import uuid
 import time
@@ -19,7 +20,7 @@ from fastapi.responses import HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from .database import (init_db, load_state, persist_assessment, persist_review,
-                       persist_submission, persist_audit_event)
+                       persist_submission, persist_audit_event, persist_declarations)
 from .ingestion import IngestionError, ingest_bytes, parse_pasted_logs
 from .artifacts import artifact_store
 from .auth import require_roles
@@ -145,12 +146,17 @@ class Store:
     workflow_events: list[dict[str, Any]] = []
     audit_events: list[dict[str, Any]] = []
     reviews: list[dict[str, Any]] = []
+    declarations: dict[str, dict[str, Any]] = {}
+    _evidence_index: dict[str, dict[str, Any]] | None = None
 
 
 app = FastAPI(title="SOC-Inspect API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    # The deployed UI is same-origin (nginx proxies /api); CORS only matters for
+    # the Vite dev server or a separately hosted UI.
+    allow_origins=[o.strip() for o in os.getenv(
+        "CORS_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173").split(",") if o.strip()],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -194,6 +200,42 @@ def error(status: int, detail: str) -> HTTPException:
     return HTTPException(status_code=status, detail={"error": detail})
 
 
+AUDIT_GENESIS = "0" * 64
+AUDIT_HASH_FIELDS = ("id", "timestamp", "event_type", "actor", "role", "target_type", "target_id",
+                     "action", "previous_state", "new_state", "assessment_id", "source", "prev_hash")
+
+
+def _audit_digest(event: dict[str, Any]) -> str:
+    core = {k: event.get(k) for k in AUDIT_HASH_FIELDS}
+    return hashlib.sha256(json.dumps(core, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _seal_audit_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Link the event to its predecessor so deletion/reordering/editing is detectable."""
+    previous = Store.audit_events[-1] if Store.audit_events else None
+    event["prev_hash"] = (previous or {}).get("event_hash") or AUDIT_GENESIS
+    event["event_hash"] = _audit_digest(event)
+    return event
+
+
+def verify_audit_chain(events: list[dict[str, Any]]) -> dict[str, Any]:
+    expected_prev, legacy = None, 0
+    for index, event in enumerate(events):
+        if "prev_hash" not in event:  # written before chaining was introduced
+            legacy += 1
+            expected_prev = event.get("event_hash")
+            continue
+        if expected_prev is not None and event["prev_hash"] != expected_prev:
+            return {"valid": False, "checked": index, "legacy_unchained": legacy,
+                    "broken_at": event.get("id"), "reason": "prev_hash does not match preceding event"}
+        if _audit_digest(event) != event.get("event_hash"):
+            return {"valid": False, "checked": index, "legacy_unchained": legacy,
+                    "broken_at": event.get("id"), "reason": "event content does not match its hash"}
+        expected_prev = event["event_hash"]
+    return {"valid": True, "checked": len(events), "legacy_unchained": legacy,
+            "head_hash": expected_prev}
+
+
 def record_audit_event(event_type: str, actor: str, target_type: str, target_id: str,
                        action: str, assessment_id: str | None = None,
                        previous_state: str | None = None, new_state: str | None = None,
@@ -205,9 +247,8 @@ def record_audit_event(event_type: str, actor: str, target_type: str, target_id:
             "target_type": target_type, "target_id": target_id, "action": action,
             "assessment_id": assessment_id, "previous_state": previous_state,
             "new_state": new_state, "source": source, "role": role}
-    event_hash = hashlib.sha256(json.dumps(core, sort_keys=True, default=str).encode()).hexdigest()
-    event = {"id": str(uuid.uuid4()), **core, "event_hash": event_hash,
-             "details": details or {}}
+    event = _seal_audit_event({"id": str(uuid.uuid4()), **core})
+    event["details"] = details or {}
     # Keep legacy keys used by older clients/tests.
     event["type"] = event_type
     event["timestamp"] = timestamp
@@ -262,6 +303,7 @@ def build_demo() -> None:
                               "records": records, "content_sha256": content_hash(records),
                               "quality_issues": quality_issues, "quality": {"issue_count": len(quality_issues),
                               "rows": len(records)}, "created_at": now().isoformat()}
+    invalidate_caches()
 
 
 def index_records(submission: dict[str, Any]) -> None:
@@ -610,6 +652,7 @@ async def create_submission(request: Request, _user: dict[str, Any] = require_ro
     Store.submissions[sid] = item
     index_records(item)
     persist_submission(item)
+    invalidate_caches()
     _audit("dataset_uploaded", "data_provider", "data_provider", "submission", sid,
            "upload submission", None, {"records": len(records)}, None, "api")
     return item
@@ -633,6 +676,7 @@ def create_paste_submission(payload: PasteSubmission, _user: dict[str, Any] = re
     Store.submissions[sid] = item
     index_records(item)
     persist_submission(item)
+    invalidate_caches()
     _audit("dataset_uploaded", "data_provider", "data_provider", "submission", sid,
            "upload pasted submission", None, {"records": len(normalized)}, None, "api")
     return item
@@ -728,13 +772,33 @@ def get_findings(assessment_id: str, _user: dict[str, Any] = require_roles("supe
     return Store.findings[assessment_id]
 
 
+def _evidence_index() -> dict[str, dict[str, Any]]:
+    """Lazily built map of row evidence ID (record:<id>#row-N) -> source record.
+
+    Built once and cached on Store; invalidated whenever a submission is
+    added/removed so uploaded rows are always indexed.
+    """
+    index = Store._evidence_index
+    if index is None:
+        index = {
+            f"record:{submission.get('id')}#row-{row.get('_row')}": row
+            for submission in Store.submissions.values()
+            for row in submission.get("records", [])
+        }
+        Store._evidence_index = index
+    return index
+
+
+def invalidate_caches() -> None:
+    Store._evidence_index = None
+
+
 def _evidence_context(assessment_id: str, finding: dict[str, Any]) -> dict[str, Any]:
     assessment = Store.assessments.get(assessment_id)
     if not assessment:
         return {}
-    submission = Store.submissions.get(assessment["submission_id"], {})
-    by_id = {f"record:{submission.get('id')}#row-{row.get('_row')}": row for row in submission.get("records", [])}
-    rows = [by_id[item] for item in finding.get("evidence", []) if item in by_id]
+    row_index = _evidence_index()
+    rows = [row_index[item] for item in finding.get("evidence", []) if item in row_index]
     return {
         "alert_ids": sorted({str(row["alert_id"]) for row in rows if row.get("alert_id")}),
         "asset_ids": sorted({str(row["asset_id"]) for row in rows if row.get("asset_id")}),
@@ -823,6 +887,12 @@ def audit_events(event_type: str | None = None, actor: str | None = None,
     return sorted(items, key=lambda e: e.get("timestamp", ""), reverse=True)
 
 
+@app.get("/api/v1/audit-events/verify")
+def audit_events_verify(_user: dict[str, Any] = require_roles("auditor", "admin", "supervisor", "reviewer")) -> dict[str, Any]:
+    """Recompute the audit hash chain and report the first break, if any."""
+    return verify_audit_chain(Store.audit_events)
+
+
 @app.get("/api/v1/review-queue")
 def review_queue(_user: dict[str, Any] = require_roles("reviewer", "supervisor", "admin")) -> list[dict[str, Any]]:
     queue = []
@@ -877,7 +947,8 @@ def _sat_engine(entity_id: str | None = None, sector: str | None = None,
             rows.append(row)
         if rows:
             submissions.append({**submission, "records": rows})
-    return SupervisoryAnalytics({"submissions": submissions})
+    declarations = [d for d in Store.declarations.values() if not entity_id or d.get("entity_id") == entity_id]
+    return SupervisoryAnalytics({"submissions": submissions, "declarations": declarations})
 
 
 def _sat_entities(engine: SupervisoryAnalytics, sector: str | None = None) -> list[dict[str, Any]]:
@@ -905,6 +976,7 @@ def _sat_findings(entity_id: str | None = None, sector: str | None = None,
             statuses[review["finding_id"]] = _norm_status(review.get("status", "NEW"))
     allowed_entities = set(_sat_engine(sector=sector).entities) if sector else None
     demo_ids = _demo_assessment_ids()
+    row_index = _evidence_index()
     result = []
     for aid, findings in Store.findings.items():
         if aid in demo_ids:
@@ -927,16 +999,9 @@ def _sat_findings(entity_id: str | None = None, sector: str | None = None,
                 continue
             evidence_dates = []
             for ev in finding.get("evidence", []):
-                match = re.search(r"^record:(.+)#row-(\d+)$", str(ev))
-                if not match:
-                    continue
-                submission = Store.submissions.get(match.group(1))
-                if not submission:
-                    continue
-                for row in submission.get("records", []):
-                    if str(row.get("_row")) == match.group(2) and row.get("timestamp"):
-                        evidence_dates.append(str(row["timestamp"])[:10])
-                        break
+                row = row_index.get(str(ev))
+                if row is not None and row.get("timestamp"):
+                    evidence_dates.append(str(row["timestamp"])[:10])
             if start_date and (not evidence_dates or max(evidence_dates) < start_date):
                 continue
             if end_date and (not evidence_dates or min(evidence_dates) > end_date):
@@ -948,13 +1013,11 @@ def _sat_findings(entity_id: str | None = None, sector: str | None = None,
 def _audit(event_type: str, actor: str, role: str, target_type: str, target_id: str,
              action: str, prev: Any = None, new: Any = None, assessment_id: str | None = None,
              source: str = "api") -> dict[str, Any]:
-    import hashlib as _h
     event = {"id": str(uuid.uuid4()), "timestamp": now().isoformat(), "event_type": event_type,
              "actor": actor, "role": role, "target_type": target_type, "target_id": target_id,
              "action": action, "previous_state": prev, "new_state": new,
              "assessment_id": assessment_id, "source": source}
-    raw = json.dumps({k: v for k, v in event.items() if k != "event_hash"}, sort_keys=True, default=str).encode()
-    event["event_hash"] = _h.sha256(raw).hexdigest()
+    _seal_audit_event(event)
     # keep legacy keys for backwards-compat views
     event["type"] = event_type
     event["details"] = {"action": action, "previous_state": prev, "new_state": new}
@@ -1174,15 +1237,14 @@ def analytics_entity(entity_id: str,
 
 def _finding_rows(finding: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    want = set(finding.get("evidence", []))
-    for sub in Store.submissions.values():
-        for r in sub.get("records", []):
-            key = f"record:{sub.get('id')}#row-{r.get('_row')}"
-            if key in want:
-                rows.append({"record_id": key, "alert_id": r.get("alert_id"), "case_id": r.get("case_id"),
-                             "timestamp": r.get("timestamp"), "entity_id": r.get("entity_id"),
-                             "severity": r.get("severity"), "asset_id": r.get("asset_id"),
-                             "status": r.get("status")})
+    row_index = _evidence_index()
+    for key in finding.get("evidence", []):
+        r = row_index.get(str(key))
+        if r is not None:
+            rows.append({"record_id": key, "alert_id": r.get("alert_id"), "case_id": r.get("case_id"),
+                         "timestamp": r.get("timestamp"), "entity_id": r.get("entity_id"),
+                         "severity": r.get("severity"), "asset_id": r.get("asset_id"),
+                         "status": r.get("status")})
     return rows
 
 
@@ -1303,7 +1365,8 @@ def analytics_execution_gaps(entity_id: str | None = None, sector: str | None = 
                              severity: str | None = None,
                              _user: dict[str, Any] = require_roles("supervisor", "reviewer", "auditor", "admin")) -> dict[str, Any]:
     engine = _sat_engine(entity_id, sector)
-    items = engine.all_execution_gaps()
+    items = [{**g, "domain": g.get("capability"), "affected_records": g.get("affected_count")}
+             for g in engine.all_execution_gaps()]
     if severity:
         items = [x for x in items if str(x.get("severity", "")).lower() == severity.lower()]
     by_rule = Counter(str(g.get("rule")) for g in items)
@@ -1538,6 +1601,72 @@ def sat_negative_space(entity_id: str | None = None, sector: str | None = None,
     if severity:
         items = [x for x in items if x.get("severity") == severity.lower()]
     return {"items": items, "signals": items, "total": len(items)}
+
+
+@app.get("/api/v1/sat/entities/{entity_id}/examination-plan")
+def sat_examination_plan(entity_id: str) -> dict[str, Any]:
+    plan = _sat_engine().examination_plan(entity_id)
+    if not plan:
+        raise error(404, "Entity not found")
+    return plan
+
+
+def store_declarations(records: list[dict[str, Any]], source: str) -> list[dict[str, Any]]:
+    """Validate and store declared KPI values (entity_id, metric, declared_value)."""
+    from .analytics import SupervisoryAnalytics as _SA
+    rows = []
+    for index, record in enumerate(records, 1):
+        eid, metric = str(record.get("entity_id") or "").strip(), str(record.get("metric") or "").strip()
+        try:
+            value = float(record.get("declared_value"))
+        except (TypeError, ValueError):
+            raise error(422, f"row {index}: declared_value must be a number")
+        if not eid or metric not in _SA.DECLARABLE_METRICS or not 0 <= value <= 100:
+            raise error(422, f"row {index}: need entity_id, metric in {sorted(_SA.DECLARABLE_METRICS)}, value 0-100")
+        rows.append({"entity_id": eid, "metric": metric, "declared_value": value,
+                     "source": str(record.get("source") or source), "created_at": now().isoformat()})
+    for row in rows:
+        Store.declarations[f"{row['entity_id']}|{row['metric']}"] = row
+    persist_declarations(rows)
+    return rows
+
+
+@app.post("/api/v1/declarations", status_code=201)
+async def upload_declarations(request: Request,
+                              _user: dict[str, Any] = require_roles("data_provider", "admin", "supervisor")) -> dict[str, Any]:
+    """Upload a CSE self-assessment (CSV/JSON/XLSX file field `file`, or a JSON list body)."""
+    if request.headers.get("content-type", "").startswith("multipart/"):
+        form = await request.form()
+        upload = form.get("file")
+        if upload is None or not hasattr(upload, "read"):
+            raise error(422, "multipart field 'file' is required")
+        try:
+            records, _ = ingest_bytes(upload.filename or "upload.csv", await upload.read())
+        except IngestionError as exc:
+            raise error(422, str(exc))
+        source = f"self-assessment:{upload.filename}"
+    else:
+        records = await request.json()
+        source = "self-assessment:api"
+    if not isinstance(records, list) or not records:
+        raise error(422, "expected a non-empty list of declarations")
+    rows = store_declarations(records, source)
+    _audit("declarations_uploaded", "data_provider", "data_provider", "declarations", source,
+           "upload self-assessment", None, {"rows": len(rows)}, None, "api")
+    return {"stored": len(rows), "entities": sorted({r["entity_id"] for r in rows})}
+
+
+@app.get("/api/v1/validation/summary")
+def validation_summary_endpoint() -> dict[str, Any]:
+    """Tool effectiveness vs ground truth, random manual sampling and examiner decisions."""
+    from .validation import validation_summary
+    return validation_summary(_sat_engine(), _sat_findings())
+
+
+@app.get("/api/v1/sat/declared-vs-observed")
+def sat_declared_vs_observed(entity_id: str | None = None) -> dict[str, Any]:
+    items = _sat_engine().declared_vs_observed(entity_id)
+    return {"items": items, "count": len(items)}
 
 
 @app.get("/api/v1/sat/peer-benchmark")

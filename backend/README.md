@@ -39,8 +39,7 @@ JSON, CSV, XLSX, and restricted plain-text PostgreSQL `.sql`/`.dump` exports
 are accepted as multipart field `file`. SQL files may contain only `INSERT INTO
 ... VALUES` rows or `COPY ... FROM STDIN` CSV blocks. DDL, binary/custom
 `pg_dump` formats, functions, expressions, and arbitrary SQL execution are
-rejected. Uploads are
-bounded to 10 MB and 10,000 rows, and each normalized record includes its
+rejected. Uploads accept files of any size, and each normalized record includes its
 source row number as `_row`. Run tests from the repository root with `pytest`.
 
 `/metrics` exposes dependency-free Prometheus text metrics for request totals,

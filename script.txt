@@ -1,0 +1,80 @@
+SAT-SA PROTOTYPE DEMO - 3 MINUTE SCRIPT (v2)
+=============================================
+(About 440 words of narration at a calm pace. Record at 1080p, browser zoom 110%, bookmarks bar hidden.)
+
+BEFORE RECORDING (once): reset the demo data so every detection appears:
+  docker compose down -v && docker compose up -d --build     (wait ~1 minute, open http://localhost:8080)
+  Local dev instead:  cd backend && python -m app.seed.generate_evidence --reset
+Do the reset BEFORE recording - it wipes saved review actions.
+
+
+[0:00 - 0:15]  OPENING - Overview page
+ACTION: Slowly pan across the KPI cards.
+SAY:
+"This is SAT-SA, our Supervisory Analytics Tool for SOC Assessment. It runs fully
+offline in two Docker containers, with no internet, no cloud and no external AI.
+We've loaded nine months of SOC records from twenty critical-sector entities:
+over eleven thousand alerts and ten thousand cases."
+
+
+[0:15 - 0:35]  WHICH ENTITIES NEED ATTENTION
+ACTION: Open "Entities", sort by risk.
+SAY:
+"The first question a supervisor asks is: where do I look first? Every entity gets
+an explainable risk score built from execution gaps, negative space, peer deviation
+and reporting integrity. Mature SOCs like HAL and BEL rank low; GAIL and the
+under-reporting entities rise to the top."
+
+
+[0:35 - 1:05]  BEHAVIOUR, NOT JUST RULES - Execution gaps page
+ACTION: Open "Execution gaps". Point at the BPCL "EG-SLA-GAMING" row.
+        Scroll down to the "Negative space" panel and point at the CPA "NS-OFFHOURS-BLIND" row.
+SAY:
+"SAT-SA detects behaviour that dashboards hide. BPCL closes sixty percent of its
+critical cases in the thirty-six minutes just before the four-hour SLA - five times more
+than just after it. The metric is driving the closure, not the investigation.
+Below is negative space: evidence that should exist but doesn't. CPA has almost no
+alerts at night while its peers detect around the clock - a monitoring blind spot."
+
+
+[1:05 - 1:30]  PAPER VS PRACTICE
+ACTION: Open "Paper vs practice". Point at the top rows and the "Overstated" card.
+SAY:
+"This is the problem statement's own definition of an execution gap: what an entity
+reports versus what its evidence shows. NTPC declares ninety-five percent escalation
+compliance; its own records show under half. Fourteen entities overstate their
+controls. Honest, mature SOCs don't."
+
+
+[1:30 - 2:05]  DRILL-DOWN AND EXAMINATION PLAN
+ACTION: Click "bpcl". Scroll past compliance, funnel and peer radar to "Examination plan".
+        Click a finding in "Findings with evidence lineage" to show source rows.
+SAY:
+"Drill into BPCL: compliance by control, the workflow funnel from alert to closure,
+and the peer comparison. SAT-SA then writes the examination plan for the supervisor -
+what to ask, which documents to request, and exactly which cases to pull first.
+Every finding links back to the source records it was based on."
+
+
+[2:05 - 2:20]  REVIEW, AUDIT, REPORT
+ACTION: "Review queue" -> validate one finding -> "Audit trail" -> "Reports" -> download PDF.
+SAY:
+"Examiners validate or reject each finding. Every action is written to a hash-chained,
+tamper-evident audit trail, and one click produces a reproducible PDF report."
+
+
+[2:20 - 2:50]  VALIDATION - IS IT BETTER THAN MANUAL SAMPLING?
+ACTION: Open "Validation". Point at the KPI cards, then trace the green curve vs the red line.
+SAY:
+"And we don't just claim it works - we measure it. Against ground truth, the risk
+ranking separates weak from strong SOCs perfectly, and all eleven planted weaknesses
+are detected. Compared with random manual sampling, a five percent sample chosen by
+SAT-SA is four and a half times richer in deficient cases, and finding half of all
+deficiencies takes twelve percent of the review effort instead of forty-eight."
+
+
+[2:50 - 3:00]  CLOSING
+ACTION: Return to "Overview".
+SAY:
+"SAT-SA doesn't replace the examiner. It tells them where to look, why, and with what
+evidence - across hundreds of entities, fully offline."

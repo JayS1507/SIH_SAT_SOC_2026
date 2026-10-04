@@ -125,8 +125,8 @@ Supported formats:
 
 Safety controls:
 
-- Maximum upload size: 10 MB.
-- Maximum records: 10,000.
+- Maximum upload size: unlimited (files up to any size are accepted).
+- Maximum records: unlimited.
 - Maximum columns: 200.
 - No arbitrary SQL execution.
 - DDL, binary/custom dumps, functions, and unsupported expressions are rejected.

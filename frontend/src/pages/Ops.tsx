@@ -194,9 +194,23 @@ export function Gaps() {
         <Panel title="Gap count by severity" subtitle="Severity mix"><Donut data={(data.by_severity || []).map((d: AnyRecord) => ({ name: d.severity, value: d.count }))} colors={SEV_COLORS} /></Panel>
       </div>
       <Panel title="Gap count by entity" subtitle="Where gaps concentrate"><Bars data={data.by_entity || []} layout="vertical" bars={[{ key: "count", color: "#d79a4b", name: "Gaps" }]} /></Panel>
-      <Panel title="Execution gap detail" subtitle="Rule, domain, affected records, evidence and action">
-        <Table rows={items} columns={[["severity", "Severity"], ["rule", "Rule"], ["domain", "Domain"], ["entity_id", "Entity"], ["affected_records", "Records"], ["rate", "Rate"], ["description", "Description"]]} />
+      <Panel title="Execution gap detail" subtitle="Rule, domain, affected records and evidence">
+        <Table rows={items.map((x) => ({ ...x, entity: <Link to={`/entities/${encodeURIComponent(x.entity_id)}`}>{x.entity_id}</Link> }))} columns={[["severity", "Severity"], ["rule", "Rule"], ["domain", "Domain"], ["entity", "Entity"], ["affected_records", "Records"], ["description", "Description"]]} />
       </Panel>
+      <NegativeSpace />
     </Page>
+  );
+}
+
+function NegativeSpace() {
+  const { f } = useFilters();
+  const { data } = useFetch<AnyRecord>("/sat/negative-space", { sector: f.sector || undefined, severity: f.severity || undefined });
+  const items: AnyRecord[] = data?.items || [];
+  return (
+    <Panel title="Negative space" subtitle="Evidence that should exist but does not: missing periods, blind spots, absent categories, peer outliers">
+      <Table rows={items.map((x) => ({ ...x, entity: <Link to={`/entities/${encodeURIComponent(x.entity_id)}`}>{x.entity_id}</Link> }))}
+        columns={[["severity", "Severity"], ["rule", "Rule"], ["capability", "Capability"], ["entity", "Entity"], ["description", "Description"]]}
+        empty="No negative-space signals." />
+    </Panel>
   );
 }

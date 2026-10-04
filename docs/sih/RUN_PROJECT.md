@@ -24,7 +24,7 @@ From the repository root:
 ### Backend
 
 ```bash
-cd /home/master/SIH_SAT_SOC
+# from the repository root
 python3 -m venv backend/.venv
 backend/.venv/bin/python -m pip install -r backend/requirements.txt
 backend/.venv/bin/uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
@@ -45,7 +45,7 @@ Metrics: http://localhost:8000/metrics
 Open another terminal:
 
 ```bash
-cd /home/master/SIH_SAT_SOC/frontend
+cd frontend
 npm install
 npm run dev
 ```
@@ -56,7 +56,7 @@ Open:
 http://localhost:5173
 ```
 
-The frontend uses `http://localhost:8000/api/v1` by default. To change it:
+In development the frontend uses `http://127.0.0.1:8000/api/v1` (from `frontend/.env.development`). Production builds call the same-origin `/api/v1`, which nginx proxies to the API. To override:
 
 ```bash
 VITE_API_URL=http://localhost:8000/api/v1 npm run dev
@@ -73,10 +73,11 @@ docker compose up --build
 Open:
 
 ```text
-Dashboard: http://localhost:5173
-API docs:  http://localhost:8000/docs
-Metrics:   http://localhost:8000/metrics
+Dashboard: http://localhost:8080          (UI and /api/v1, one origin)
+Health:    http://localhost:8080/api/v1/health
 ```
+
+The first start seeds the 20-entity demo dataset into the `satsa-data` volume (~1 minute). The API is not published on the host; it is only reachable through nginx. For the air-gapped installation, see "Deployment" in the root `README.md`.
 
 Stop the services:
 

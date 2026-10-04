@@ -251,13 +251,13 @@ ARCHETYPE_PARAMS: dict[str, dict[str, Any]] = {
         "escalation_latency_mean": 28,
         "data_quality_issue_rate": 0.015,
     },
-    "investigation_failure": {  # INVESTIGATION_FAILURE: cases lack investigations
+    "investigation_failure": {  # INVESTIGATION_FAILURE: cases lack investigations, boilerplate notes
         "alert_volume_factor": 1.0,
         "investigation_coverage": 0.55,
         "escalation_coverage": 0.80,
         "response_coverage": 0.75,
         "fast_closure_rate": 0.06,
-        "template_rate": 0.08,
+        "template_rate": 0.30,
         "missing_evidence_rate": 0.12,
         "remediation_rate": 0.60,
         "monitoring_coverage": 0.85,
@@ -381,6 +381,8 @@ INVESTIGATION_CONCLUSIONS = [
     "No further indicators found; case closed with monitoring.",
 ]
 
+# Archetypes whose analysts reuse boilerplate investigation narratives.
+TEMPLATE_ARCHETYPES = {"template_investigation", "investigation_failure"}
 TEMPLATE_NOTE = "Standard investigation template: reviewed alert, checked telemetry, and closed with no further action required."
 
 REMEDIATION_ACTIONS = [
@@ -464,6 +466,7 @@ def generate_all(rng: random.Random) -> dict[str, list[dict[str, Any]]]:
         sector = entity_def["sector"]
         archetype = entity_def["archetype"]
         params = ARCHETYPE_PARAMS[archetype]
+        template_rng = random.Random(f"template-{entity_id}")
         sector_base = SECTOR_BASELINES.get(sector, SECTOR_BASELINES["Transport & Logistics"])
 
         entities_out.append({
@@ -642,17 +645,17 @@ def generate_all(rng: random.Random) -> dict[str, list[dict[str, Any]]]:
                         inv_counter += 1
                         # Notes
                         asset_label = asset_id or "unmonitored asset"
-                        if archetype == "template_investigation" and rng.random() < params["template_rate"]:
+                        template = rng.choice(INVESTIGATION_NOTE_TEMPLATES)
+                        conclusion = rng.choice(INVESTIGATION_CONCLUSIONS)
+                        notes = template.format(
+                            asset=asset_label,
+                            category=category,
+                            duration=inv_duration,
+                            conclusion=conclusion,
+                        )
+                        # Separate RNG so templating never shifts the main random stream.
+                        if archetype in TEMPLATE_ARCHETYPES and template_rng.random() < params["template_rate"]:
                             notes = TEMPLATE_NOTE
-                        else:
-                            template = rng.choice(INVESTIGATION_NOTE_TEMPLATES)
-                            conclusion = rng.choice(INVESTIGATION_CONCLUSIONS)
-                            notes = template.format(
-                                asset=asset_label,
-                                category=category,
-                                duration=inv_duration,
-                                conclusion=conclusion,
-                            )
 
                         # Missing evidence
                         has_evidence = rng.random() > params["missing_evidence_rate"]
@@ -670,7 +673,7 @@ def generate_all(rng: random.Random) -> dict[str, list[dict[str, Any]]]:
                             "evidence_count": evidence_count,
                             "conclusion": rng.choice(INVESTIGATION_CONCLUSIONS) if rng.random() > 0.05 else None,
                             "investigation_notes": notes,
-                            "template_match": archetype == "template_investigation" and notes == TEMPLATE_NOTE,
+                            "template_match": notes == TEMPLATE_NOTE,
                         }
                         investigations_out.append(inv)
 
@@ -750,7 +753,7 @@ def generate_all(rng: random.Random) -> dict[str, list[dict[str, Any]]]:
                 "status": "submitted",
             })
 
-    return {
+    tables = {
         "entities": entities_out,
         "assets": assets_out,
         "alerts": alerts_out,
@@ -761,6 +764,127 @@ def generate_all(rng: random.Random) -> dict[str, list[dict[str, Any]]]:
         "remediations": remediations_out,
         "submissions": submissions_out,
     }
+    inject_supervisory_behaviours(tables)
+    return tables
+
+
+# ---------------------------------------------------------------------------
+# Planted supervisory behaviours (ground truth for validation)
+# ---------------------------------------------------------------------------
+# Applied after generation with per-entity RNGs, so every other entity's data
+# is byte-identical with or without them.
+PLANTED_BEHAVIOURS = {
+    "bpcl": "sla_gaming",            # looks fine on KPIs; closes cases just inside the SLA
+    "cpa": "offhours_blind",         # monitoring gap: no detections at night
+    "rail": "analyst_concentration",  # one login records most investigations
+}
+STRONG_ARCHETYPES = {"strong_mature", "strong_high_volume", "good_minor_gap"}
+# Expected supervisory signal per behaviour (used by the validation module).
+BEHAVIOUR_SIGNALS = {
+    "escalation_gap": "EG-MISSING-ESC",
+    "under_reporting": "NS-MISSING-SUB",
+    "response_failure": "EG-ESC-NO-RESP",
+    "investigation_failure": "EG-TEMPLATE",
+    "fast_closure": "EG-FAST-CRITICAL",
+    "premature_closure": "EG-FAST-CRITICAL",
+    "sla_gaming": "EG-SLA-GAMING",
+    "offhours_blind": "NS-OFFHOURS-BLIND",
+    "analyst_concentration": "EG-ANALYST-CONCENTRATION",
+}
+SLA_MINUTES = 240
+IST = timedelta(hours=5, minutes=30)
+
+
+def ground_truth() -> dict[str, dict[str, Any]]:
+    """Synthetic ground truth: which entities were built weak, and why."""
+    truth = {}
+    for e in ENTITIES:
+        behaviours = [e["archetype"]] if e["archetype"] in BEHAVIOUR_SIGNALS else []
+        if e["id"] in PLANTED_BEHAVIOURS:
+            behaviours.append(PLANTED_BEHAVIOURS[e["id"]])
+        if e["archetype"] in STRONG_ARCHETYPES and not behaviours:
+            label = "strong"
+        elif e["archetype"] == "mixed_moderate" and not behaviours:
+            label = "mixed"
+        else:
+            label = "weak"
+        truth[e["id"]] = {"archetype": e["archetype"], "label": label, "behaviours": behaviours,
+                          "expected_signals": [BEHAVIOUR_SIGNALS[b] for b in behaviours]}
+    return truth
+
+
+def _parse(value: Any) -> datetime | None:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _shift_times(record: dict[str, Any], delta: timedelta) -> None:
+    for key, value in list(record.items()):
+        if key.endswith(("_at", "_time", "timestamp")):
+            ts = _parse(value)
+            if ts:
+                record[key] = _ts_str(ts + delta)
+
+
+def inject_supervisory_behaviours(tables: dict[str, list[dict[str, Any]]]) -> None:
+    by_case = {name: {r["case_id"]: r for r in tables[name] if r.get("case_id")}
+               for name in ("cases", "investigations", "escalations", "responses", "remediations")}
+    for entity_id, behaviour in PLANTED_BEHAVIOURS.items():
+        rng = random.Random(f"planted-{entity_id}")
+        alerts = [a for a in tables["alerts"] if a["entity_id"] == entity_id]
+        if behaviour == "offhours_blind":
+            # Detections only appear during the day shift: night alerts surface hours later.
+            for alert in alerts:
+                ts = _parse(alert.get("timestamp"))
+                if not ts or (ts + IST).hour >= 7 or rng.random() > 0.97:
+                    continue
+                delta = timedelta(hours=9)
+                _shift_times(alert, delta)
+                for table in by_case.values():
+                    if alert.get("case_id") in table:
+                        _shift_times(table[alert["case_id"]], delta)
+        elif behaviour == "sla_gaming":
+            for alert in alerts:
+                case = by_case["cases"].get(alert.get("case_id"))
+                inv = by_case["investigations"].get(alert.get("case_id"))
+                start = _parse(alert.get("timestamp"))
+                if (not case or not inv or not start or alert["severity"] not in ("critical", "high")
+                        or rng.random() > 0.6):
+                    continue
+                closed = start + timedelta(minutes=rng.uniform(SLA_MINUTES * 0.86, SLA_MINUTES - 1))
+                inv_start = _parse(inv.get("start_time"))
+                inv_end = closed - timedelta(minutes=rng.randint(2, 8))
+                if not inv_start or inv_end <= inv_start:
+                    continue
+                case["closed_at"] = _ts_str(closed)
+                inv["end_time"] = _ts_str(inv_end)
+                inv["duration_minutes"] = max(1, int((inv_end - inv_start).total_seconds() // 60))
+        elif behaviour == "analyst_concentration":
+            for inv in tables["investigations"]:
+                if inv["case_id"].startswith(f"{entity_id}-") and rng.random() < 0.7:
+                    inv["analyst_id"] = f"{entity_id}-analyst-01"
+
+
+def build_declarations(observed: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Synthetic CSE self-assessments: strong SOCs report honestly, weak ones overclaim."""
+    truth = ground_truth()
+    rows = []
+    for eid in sorted(observed):
+        rng = random.Random(f"declare-{eid}")
+        honest = truth.get(eid, {}).get("label") == "strong"
+        for metric in ("investigation_coverage", "escalation_rate", "response_coverage",
+                       "monitoring_coverage", "evidence_completeness"):
+            obs = observed[eid].get(metric)
+            if obs is None:
+                continue
+            declared = obs + rng.uniform(0, 2.5) if honest else max(obs + rng.uniform(0, 3), rng.uniform(93, 99))
+            rows.append({"entity_id": eid, "metric": metric, "declared_value": round(min(100.0, declared), 1),
+                         "source": "self-assessment (synthetic)"})
+    return rows
 
 
 def generate_flat_records(tables: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -916,6 +1040,7 @@ def seed(reset: bool = False) -> dict[str, Any]:
         Store.workflow_events.clear()
         Store.audit_events.clear()
         Store.reviews.clear()
+        Store._evidence_index = None
         with SessionLocal.begin() as session:
             for model in (FindingRow, ReviewRow, AssessmentRow, SubmissionRow, EntityRow):
                 session.query(model).delete()
@@ -984,6 +1109,15 @@ def seed(reset: bool = False) -> dict[str, Any]:
     Store.assessments[assessment_id] = assessment
     persist_assessment(assessment, findings)
 
+    # Self-assessment declarations derived from what the evidence actually shows.
+    from ..main import _sat_engine, store_declarations
+    from ..database import DeclarationRow
+    with SessionLocal.begin() as session:
+        session.query(DeclarationRow).delete()
+    Store.declarations.clear()
+    store_declarations(build_declarations(_sat_engine().peer_benchmark()["entities"]),
+                       "self-assessment (synthetic)")
+
     digest = hashlib.sha256(raw_bytes).hexdigest()
     return {
         "submission_id": submission_id,
@@ -1018,8 +1152,7 @@ def export_demo_csv(path: str, max_rows: int = 6000) -> dict[str, Any]:
     """Write examples/sat_sa_demo_soc.csv with the spec §22 schema (relational, consistent).
 
     Rows are round-robin sampled across entities so every entity is
-    represented even when max_rows caps the output. The default keeps the
-    file under the 10,000-row ingestion limit so the demo CSV uploads cleanly.
+    represented even when max_rows caps the output.
     """
     import csv
     rng = random.Random(SEED)
@@ -1052,12 +1185,14 @@ def export_demo_csv(path: str, max_rows: int = 6000) -> dict[str, Any]:
             "entity_id": alert.get("entity_id", ""), "entity_name": ent.get("entity_name", ""),
             "sector": ent.get("sector", ""), "asset_id": alert.get("asset_id") or "",
             "asset_name": asset.get("asset_name", ""), "asset_criticality": asset.get("criticality", ""),
-            "alert_id": alert.get("alert_id", ""), "severity": alert.get("severity", ""),
+            "alert_id": alert.get("alert_id", ""), "alert_category": alert.get("category", ""),
+            "severity": alert.get("severity", ""),
             "alert_status": alert.get("status", ""), "case_id": alert.get("case_id") or "",
             "case_status": case.get("status", ""), "investigation_id": inv.get("investigation_id", ""),
             "investigation_status": "completed" if inv else ("missing" if case else ""),
             "investigation_started": inv.get("start_time", ""), "investigation_completed": inv.get("end_time", ""),
             "investigation_conclusion": inv.get("conclusion", ""),
+            "investigation_notes": inv.get("investigation_notes", ""),
             "investigation_duration_minutes": inv.get("duration_minutes", ""),
             "evidence_count": inv.get("evidence_count", ""),
             "escalation_id": esc.get("escalation_id", "") or alert.get("escalation_id") or "",
@@ -1078,8 +1213,14 @@ def export_demo_csv(path: str, max_rows: int = 6000) -> dict[str, Any]:
 
     rows: list[dict[str, Any]] = []
     n = 0
-    # round-robin across entities for balanced coverage
-    queues = {eid: list(alerts) for eid, alerts in by_entity.items()}
+    # Round-robin across entities for balanced coverage. Each entity's queue is
+    # an even random sample over the whole period (chronological), so capping
+    # max_rows never truncates later reporting months.
+    per_entity = max_rows // max(len(by_entity), 1) + 1
+    queues = {}
+    for eid, alerts in by_entity.items():
+        picked = alerts if len(alerts) <= per_entity else random.Random(f"csv-{eid}").sample(alerts, per_entity)
+        queues[eid] = sorted(picked, key=lambda a: str(a.get("timestamp", "")))
     while any(queues.values()) and len(rows) < max_rows:
         for eid in sorted(queues):
             if queues[eid] and len(rows) < max_rows:
@@ -1124,7 +1265,17 @@ def export_demo_csv(path: str, max_rows: int = 6000) -> dict[str, Any]:
         w.writeheader()
         w.writerows(rows)
     digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
-    return {"path": str(p), "rows": len(rows), "sha256": digest}
+    # Companion self-assessment file for the paper-vs-practice demo.
+    from ..analytics import SupervisoryAnalytics
+    from ..ingestion import ingest_bytes
+    records, _ = ingest_bytes(p.name, p.read_bytes())
+    observed = SupervisoryAnalytics({"submissions": [{"id": "csv", "records": records}]}).peer_benchmark()["entities"]
+    decl_path = p.with_name("sat_sa_self_assessment.csv")
+    with decl_path.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["entity_id", "metric", "declared_value", "source"])
+        w.writeheader()
+        w.writerows(build_declarations(observed))
+    return {"path": str(p), "rows": len(rows), "sha256": digest, "self_assessment": str(decl_path)}
 
 
 if __name__ == "__main__":

@@ -76,7 +76,7 @@ export function SubmissionPanel({ api, onSubmitted }: SubmissionPanelProps) {
         {mode === "file" ? (
           <label>Data file
             <input type="file" accept=".csv,.json,.sql,.dump,.xlsx,.xlsm" onChange={selectFile} />
-            <small>Try examples/sat_sa_demo_soc.csv — maximum 10 MB / 10,000 rows.</small>
+            <small>Try examples/sat_sa_demo_soc.csv — unlimited file size.</small>
           </label>
         ) : (
           <label>Paste one record per line

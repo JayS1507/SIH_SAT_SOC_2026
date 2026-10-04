@@ -77,6 +77,25 @@ class EntityRow(Base):
     )
 
 
+class DeclarationRow(Base):
+    """CSE self-assessment values (declared KPIs) for paper-vs-practice checks."""
+    __tablename__ = "declarations"
+    id: Mapped[str] = mapped_column(String(300), primary_key=True)
+    payload: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+def persist_declarations(rows: list[dict[str, Any]], replace: bool = False) -> None:
+    import json
+    with SessionLocal.begin() as session:
+        if replace:
+            session.query(DeclarationRow).delete()
+        for row in rows:
+            session.merge(DeclarationRow(id=f"{row['entity_id']}|{row['metric']}",
+                                         payload=json.dumps(row, default=str),
+                                         created_at=datetime.fromisoformat(row["created_at"])))
+
+
 def init_db() -> None:
     Base.metadata.create_all(engine)
     inspector = inspect(engine)
@@ -171,10 +190,17 @@ def load_state(store: Any) -> None:
             store.findings.setdefault(row.assessment_id, []).append(json.loads(row.payload))
         for row in session.query(ReviewRow).all():
             store.reviews.append(json.loads(row.payload))
+        if hasattr(store, "declarations"):
+            for row in session.query(DeclarationRow).all():
+                item = json.loads(row.payload)
+                store.declarations[f"{item['entity_id']}|{item['metric']}"] = item
         if hasattr(store, "audit_events"):
-            for row in session.query(AuditEventRow).all():
+            # Chronological order matters: audit events form a hash chain.
+            seen = {item.get("id") for item in store.audit_events}
+            for row in session.query(AuditEventRow).order_by(AuditEventRow.created_at).all():
                 event = json.loads(row.payload)
-                if not any(item.get("id") == event.get("id") for item in store.audit_events):
+                if event.get("id") not in seen:
+                    seen.add(event.get("id"))
                     store.audit_events.append(event)
 
 

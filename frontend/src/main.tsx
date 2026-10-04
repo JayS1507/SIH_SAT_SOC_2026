@@ -8,14 +8,16 @@ import Overview from "./pages/Overview";
 import { Entities, EntityDetail } from "./pages/Entities";
 import { Alerts, Investigations, Escalations, Monitoring, Gaps } from "./pages/Ops";
 import { Findings, FindingDetail, Review, Peer, Quality, Reports, Audit } from "./pages/Gov";
+import { Validation, PaperVsPractice } from "./pages/Assurance";
 
 const nav = [
   ["Overview", "/", "⌂"], ["Entities", "/entities", "◈"], ["Alerts", "/alerts", "◉"],
   ["Investigations", "/investigations", "⌕"], ["Escalations", "/escalations", "↗"],
   ["Monitoring", "/monitoring", "◌"], ["Execution gaps", "/execution-gaps", "△"],
-  ["Findings", "/findings", "▣"], ["Review queue", "/review", "✓"],
+  ["Paper vs practice", "/paper-vs-practice", "⇄"], ["Findings", "/findings", "▣"], ["Review queue", "/review", "✓"],
   ["Peer benchmark", "/peer-benchmark", "▥"], ["Data quality", "/data-quality", "◇"],
   ["Submissions", "/submissions", "⇧"], ["Reports", "/reports", "▤"], ["Audit trail", "/audit", "◫"],
+  ["Validation", "/validation", "✔"],
 ];
 
 function Submissions() {
@@ -23,7 +25,7 @@ function Submissions() {
     <Page title="Submissions" subtitle="Upload SOC evidence: CSV, JSON, XLSX, SQL export or pasted logs">
       <Panel><SubmissionPanel api={API} onSubmitted={() => window.location.reload()} /></Panel>
       <Panel title="Demonstration dataset" subtitle="Relational, internally consistent synthetic evidence">
-        <p className="summary">Use <code>examples/sat_sa_demo_soc.csv</code> (20 entities, 32 columns) to demonstrate the full platform: compliant and non-compliant workflows, missing escalations, investigation gaps, duplicates and reporting gaps.</p>
+        <p className="summary">Use <code>examples/sat_sa_demo_soc.csv</code> (21 entities, 40 columns) and <code>examples/sat_sa_self_assessment.csv</code> on the Paper vs practice page to demonstrate the full platform: compliant and non-compliant workflows, missing escalations, investigation gaps, duplicates and reporting gaps.</p>
       </Panel>
     </Page>
   );
@@ -62,6 +64,8 @@ function Shell() {
             <Route path="/submissions" element={<Submissions />} />
             <Route path="/reports" element={<Reports />} />
             <Route path="/audit" element={<Audit />} />
+            <Route path="/validation" element={<Validation />} />
+            <Route path="/paper-vs-practice" element={<PaperVsPractice />} />
           </Routes>
         </main>
       </div>

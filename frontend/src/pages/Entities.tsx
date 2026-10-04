@@ -1,3 +1,4 @@
+import { ExaminationPlan } from "./Assurance";
 import { Link, useParams } from "react-router-dom";
 import { useFetch, useFilters, Page, Panel, Card, Table, FilterBar,
   Donut, Bars, Trend, RadarPlot, FunnelView, STATUS_COLORS, type AnyRecord } from "../ui";
@@ -40,7 +41,7 @@ export function EntityDetail() {
   const dq: AnyRecord = data.data_quality || {};
   const peer: AnyRecord = data.peer || {};
   const findings: AnyRecord[] = data.findings || [];
-  const funnel: AnyRecord[] = data.funnel || [];
+  const funnel: Parameters<typeof FunnelView>[0]["stages"] = data.funnel || [];
   const controls: AnyRecord[] = c.controls || [];
 
   const donut = ["COMPLIANT", "PARTIALLY_COMPLIANT", "NON_COMPLIANT", "INSUFFICIENT_EVIDENCE"].map((s) => ({
@@ -107,6 +108,8 @@ export function EntityDetail() {
         {radar.length ? <RadarPlot data={radar} keys={[{ key: "entity", color: "#2f7ea6", name: c.entity_name }, { key: "median", color: "#d79a4b", name: "Sector median" }]} /> : <div className="state">No sufficient evidence for this analysis.</div>}
         <Table rows={radar.map((r: AnyRecord) => ({ ...r, deviation: Math.round(((r.entity || 0) - (r.median || 0)) * 10) / 10 }))} columns={[["metric", "Metric"], ["entity", "Entity"], ["median", "Sector median"], ["deviation", "Deviation"]]} />
       </Panel>
+
+      <ExaminationPlan id={id} />
 
       <Panel title="Findings with evidence lineage" subtitle="Click a finding for source rows, rule and calculation">
         <Table

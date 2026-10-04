@@ -8,8 +8,6 @@ from typing import Any
 
 from openpyxl import load_workbook
 
-MAX_BYTES = 10 * 1024 * 1024
-MAX_ROWS = 10_000
 MAX_COLUMNS = 200
 MAX_SQL_STATEMENTS = 10_000
 
@@ -23,8 +21,6 @@ def _lineage(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def ingest_bytes(filename: str, content: bytes) -> tuple[list[dict[str, Any]], str]:
-    if len(content) > MAX_BYTES:
-        raise IngestionError("Uploaded file exceeds the 10 MB limit")
     suffix = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
     try:
         if suffix == "json":
@@ -52,15 +48,11 @@ def ingest_bytes(filename: str, content: bytes) -> tuple[list[dict[str, Any]], s
             raise IngestionError("Supported uploads are JSON, CSV, XLSX, SQL, and PostgreSQL dump exports")
     except (UnicodeDecodeError, json.JSONDecodeError, csv.Error, StopIteration) as exc:
         raise IngestionError(f"Invalid {suffix.upper()} file: {exc}") from exc
-    if len(records) > MAX_ROWS:
-        raise IngestionError("Uploaded file exceeds the 10,000 row limit")
     return _lineage(records), suffix
 
 
 def parse_pasted_logs(content: str) -> list[dict[str, Any]]:
     """Parse offline pasted JSON-lines or conservative key=value log lines."""
-    if len(content.encode("utf-8")) > MAX_BYTES:
-        raise IngestionError("Pasted logs exceed the 10 MB limit")
     lines = [line.strip() for line in content.splitlines() if line.strip()]
     if not lines:
         raise IngestionError("Pasted logs are empty")
@@ -79,8 +71,6 @@ def parse_pasted_logs(content: str) -> list[dict[str, Any]]:
         if not normalized:
             raise IngestionError("Each pasted log line must be a JSON object or key=value fields")
         records.append(normalized)
-    if len(records) > MAX_ROWS:
-        raise IngestionError("Pasted logs exceed the 10,000 row limit")
     return _lineage(records)
 
 
@@ -222,6 +212,4 @@ def parse_sql_export(content: bytes) -> list[dict[str, Any]]:
             i += 1
             continue
         raise IngestionError("SQL export contains unsupported statements; only INSERT and COPY are allowed")
-    if len(records) > MAX_ROWS:
-        raise IngestionError("Uploaded file exceeds the 10,000 row limit")
     return records

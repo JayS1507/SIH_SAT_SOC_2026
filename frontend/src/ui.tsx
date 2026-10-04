@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import {
-  Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart, Area, AreaChart,
+  Bar, BarChart, CartesianGrid, Cell, Legend, Line, Area, ComposedChart,
   Pie, PieChart, Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
   ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis, ZAxis,
 } from "recharts";
@@ -179,10 +179,10 @@ export function Bars({ data, xKey = "name", bars, layout = "horizontal", height 
 }
 
 export function Trend({ data, xKey = "month", series }: { data: AnyRecord[]; xKey?: string; series: { key: string; color?: string; name?: string; area?: boolean }[] }) {
-  const C: any = series.some((s) => s.area) ? AreaChart : LineChart;
+  // ComposedChart: AreaChart silently drops <Line> children, so mixed series need it.
   return (
     <ChartShell data={data} height={280}>
-      <C data={data} margin={{ top: 8, right: 12, bottom: 4, left: -8 }}>
+      <ComposedChart data={data} margin={{ top: 8, right: 12, bottom: 4, left: -8 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="#dce6ef" />
         <XAxis dataKey={xKey} tick={{ fontSize: 11 }} />
         <YAxis tick={{ fontSize: 11 }} />
@@ -190,10 +190,10 @@ export function Trend({ data, xKey = "month", series }: { data: AnyRecord[]; xKe
         <Legend />
         {series.map((s, i) =>
           s.area
-            ? <Area key={s.key} type="monotone" dataKey={s.key} name={s.name || s.key} stroke={s.color || COLORS[i % COLORS.length]} fill={s.color || COLORS[i % COLORS.length]} fillOpacity={0.25} />
-            : <Line key={s.key} type="monotone" dataKey={s.key} name={s.name || s.key} stroke={s.color || COLORS[i % COLORS.length]} strokeWidth={2.5} dot={false} />
+            ? <Area key={s.key} type="monotone" dataKey={s.key} name={s.name || s.key} stroke={s.color || COLORS[i % COLORS.length]} fill={s.color || COLORS[i % COLORS.length]} fillOpacity={0.25} isAnimationActive={false} />
+            : <Line key={s.key} type="monotone" dataKey={s.key} name={s.name || s.key} stroke={s.color || COLORS[i % COLORS.length]} strokeWidth={2.5} dot={false} isAnimationActive={false} />
         )}
-      </C>
+      </ComposedChart>
     </ChartShell>
   );
 }
@@ -226,7 +226,7 @@ export function RadarPlot({ data, keys }: { data: AnyRecord[]; keys: { key: stri
         <PolarGrid />
         <PolarAngleAxis dataKey="metric" tick={{ fontSize: 10 }} />
         <PolarRadiusAxis domain={[0, 100]} tick={false} />
-        {keys.map((k) => <Radar key={k.key} name={k.name} dataKey={k.key} stroke={k.color} fill={k.color} fillOpacity={0.25} />)}
+        {keys.map((k) => <Radar key={k.key} name={k.name} dataKey={k.key} stroke={k.color} fill={k.color} fillOpacity={0.25} isAnimationActive={false} />)}
         <Legend />
         <Tooltip />
       </RadarChart>
