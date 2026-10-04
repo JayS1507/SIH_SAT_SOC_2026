@@ -9,7 +9,11 @@ from sqlalchemy import DateTime, ForeignKey, String, Text, create_engine, inspec
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 
-DEFAULT_DATABASE_URL = f"sqlite:///{(Path(__file__).resolve().parents[2] / 'soc_inspect.db').as_posix()}"
+# Serverless (Vercel) bundles are read-only; only /tmp is writable there and it
+# is per-instance and ephemeral. Set DATABASE_URL (e.g. PostgreSQL) to persist.
+ON_SERVERLESS = bool(os.getenv("VERCEL"))
+DEFAULT_DATABASE_URL = ("sqlite:////tmp/soc_inspect.db" if ON_SERVERLESS else
+                        f"sqlite:///{(Path(__file__).resolve().parents[2] / 'soc_inspect.db').as_posix()}")
 DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL)
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, connect_args=connect_args, future=True)
@@ -206,5 +210,29 @@ def load_state(store: Any) -> None:
 
 # Keep the offline demo usable even when an ASGI test client does not trigger
 # lifespan events (the normal server still initializes this during startup).
+def restore_demo_snapshot() -> bool:
+    """On serverless cold start, unpack the bundled demo database into /tmp.
+
+    Loading the snapshot takes ~1 s versus ~25 s to regenerate the dataset.
+    Must run before anything creates the SQLite file.
+    """
+    if not (ON_SERVERLESS and DATABASE_URL == DEFAULT_DATABASE_URL
+            and os.getenv("SEED_DEMO", "true") == "true"):
+        return False
+    import gzip
+    import shutil
+    target = Path(DATABASE_URL.removeprefix("sqlite:///"))
+    snapshot = Path(__file__).resolve().parent / "seed" / "demo_snapshot.db.gz"
+    if target.exists() or not snapshot.exists():
+        return False
+    partial = target.with_suffix(".partial")
+    with gzip.open(snapshot, "rb") as src, partial.open("wb") as dst:
+        shutil.copyfileobj(src, dst)
+    partial.replace(target)
+    return True
+
+
+restore_demo_snapshot()
+
 if os.getenv("ALEMBIC_RUNNING") != "1":
     init_db()

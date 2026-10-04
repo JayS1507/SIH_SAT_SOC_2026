@@ -16,7 +16,7 @@ class Artifact:
 class ArtifactStore:
     def __init__(self) -> None:
         self.backend = os.getenv("ARTIFACT_STORAGE", "local").lower()
-        self.root = Path(os.getenv("ARTIFACT_LOCAL_DIR", "./artifacts"))
+        self.root = Path(os.getenv("ARTIFACT_LOCAL_DIR", "/tmp/artifacts" if os.getenv("VERCEL") else "./artifacts"))
         self.bucket = os.getenv("S3_BUCKET", "")
         self._s3 = None
         if self.backend in {"s3", "minio"}:

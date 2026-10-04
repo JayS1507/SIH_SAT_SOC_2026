@@ -579,6 +579,14 @@ def startup() -> None:
     load_state(Store)
     for submission in Store.submissions.values():
         index_records(submission)
+    # Serverless instances start with an empty /tmp database: seed the demo
+    # dataset on cold start (Docker seeds once via its entrypoint instead).
+    # database.py restores the bundled snapshot first (~1 s); this is the
+    # fallback when the snapshot is missing (~25 s).
+    if (os.getenv("VERCEL") and os.getenv("SEED_DEMO", "true") == "true"
+            and not any(s.get("source") != "demo" for s in Store.submissions.values())):
+        from .seed.generate_evidence import seed
+        seed()
     build_demo()
 
 

@@ -36,6 +36,12 @@ The first start seeds the deterministic 20-entity demo dataset into the `satsa-d
 
 Auth is disabled for the demo (`DEMO_AUTH_DISABLED=true`). Production must set it to `false` and provide a strong `JWT_SECRET`. The API runs as one worker by design, because assessment state is held in-process and backed by the database.
 
+## Hosted demo (Vercel)
+
+`vercel.json` deploys the project as two services on one domain: `frontend` (Vite static build) serves `/`, and `backend` (FastAPI, `backend/index.py`) serves `/api/*`. This is for a public demo link only. The NCIIPC deployment target is the offline Docker stack above.
+
+Interactive API docs are at `/docs`. Serverless limits apply. Each instance unpacks the bundled demo snapshot (`backend/app/seed/demo_snapshot.db.gz`) into its own `/tmp` SQLite on cold start (~1 s), and reviews and uploads are not shared between instances or kept across restarts. After changing the generator, regenerate the snapshot: `DATABASE_URL=sqlite:////tmp/s.db python -m app.seed.generate_evidence --reset && gzip -9 -n -c /tmp/s.db > app/seed/demo_snapshot.db.gz` (run inside `backend/`). For persistence, set `DATABASE_URL` to PostgreSQL. Uploads are limited to 4.5 MB per request.
+
 ## Local development
 
 Prerequisites: Python 3.12+, Node 20+.
@@ -47,7 +53,7 @@ pip install -r backend/requirements.txt
 uvicorn app.main:app --app-dir backend
 
 # Frontend (http://127.0.0.1:5173)
-cd frontend && npm install && npm run dev
+cd frontend && npm install && npm run dev   # proxies /api to :8000
 
 # (Re)seed the 20-entity synthetic demo dataset (11.6k alerts, deterministic)
 cd backend && python -m app.seed.generate_evidence --reset
